@@ -5,13 +5,35 @@ from pathlib import Path
 
 from datetime import timedelta
 
+from dotenv import load_dotenv
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = "django-insecure-studyforge-local-development-only"
+# Local development: load backend/.env if present. Production should set
+# process environment (e.g. /etc/studyforge.env) instead of committing secrets.
+load_dotenv(BASE_DIR / ".env")
 
-DEBUG = True
 
-ALLOWED_HOSTS = ["localhost", "127.0.0.1", "host.docker.internal"]
+def _env_bool(name: str, default: str = "0") -> bool:
+    return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_csv(name: str, default: str) -> list[str]:
+    return [item.strip() for item in os.environ.get(name, default).split(",") if item.strip()]
+
+
+SECRET_KEY = os.environ.get(
+    "DJANGO_SECRET_KEY",
+    "django-insecure-studyforge-local-development-only",
+)
+
+# Default on for local. Set DJANGO_DEBUG=0 in production.
+DEBUG = _env_bool("DJANGO_DEBUG", "1")
+
+ALLOWED_HOSTS = _env_csv(
+    "DJANGO_ALLOWED_HOSTS",
+    "localhost,127.0.0.1,host.docker.internal",
+)
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -110,6 +132,7 @@ USE_I18N = True
 USE_TZ = True
 
 STATIC_URL = "static/"
+STATIC_ROOT = Path(os.environ.get("STATIC_ROOT", str(BASE_DIR / "staticfiles")))
 
 # Private uploads: no public media route is registered.
 MEDIA_ROOT = Path(os.environ.get("MEDIA_ROOT", str(BASE_DIR / "media")))
@@ -154,11 +177,19 @@ SIMPLE_JWT = {
     "BLACKLIST_AFTER_ROTATION": True,
     "AUTH_HEADER_TYPES": ("Bearer",),
 }
-CORS_ALLOWED_ORIGINS = [
+CORS_ALLOWED_ORIGINS = _env_csv(
+    "CORS_ALLOWED_ORIGINS",
     "http://localhost:5173",
-]
+)
 CORS_ALLOW_CREDENTIALS = True
 
-CSRF_TRUSTED_ORIGINS = [
+CSRF_TRUSTED_ORIGINS = _env_csv(
+    "CSRF_TRUSTED_ORIGINS",
     "http://localhost:5173",
-]
+)
+
+# Harden cookies and HTTPS assumptions when DEBUG is off (production / HTTPS).
+if not DEBUG:
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
