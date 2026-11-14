@@ -45,6 +45,17 @@ EMBEDDING_BATCH_SIZE = int(os.environ.get("EMBEDDING_BATCH_SIZE", "16"))
 CELERY_BROKER_URL = PROCESSING_REDIS_URL
 CELERY_TASK_IGNORE_RESULT = True
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+# A task is acknowledged only after the task function returns successfully.
+# If the worker process/pod dies first, Redis can make the task visible again
+# for another worker. The timeout must exceed the longest PDF processing run.
+CELERY_TASK_ACKS_LATE = True
+CELERY_TASK_REJECT_ON_WORKER_LOST = True
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+CELERY_BROKER_TRANSPORT_OPTIONS = {
+    "visibility_timeout": int(
+        os.environ.get("PROCESSING_REDIS_VISIBILITY_TIMEOUT", "3600")
+    ),
+}
 CELERY_TASK_ROUTES = {
     "processing_service.tasks.process_document_task": {
         "queue": "document-processing",

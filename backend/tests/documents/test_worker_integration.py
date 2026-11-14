@@ -98,6 +98,47 @@ def test_uploaded_pdf_reaches_ready_and_identical_redelivery_is_acknowledged(
 
 
 @pytest.mark.django_db(transaction=True)
+def test_worker_crash_redelivery_finishes_once(
+    worker_bridge, owner_client, course, pdf_factory, dispatch, monkeypatch,
+):
+    """A task replayed after a worker dies uses the same job and one final result."""
+    from processing_service import tasks
+
+    document, job = upload_job(owner_client, course, pdf_factory)
+    original_extract = tasks.extract_document
+
+    def crash_after_fetch(*args, **kwargs):
+        raise SystemExit("worker process lost")
+
+    with monkeypatch.context() as crashed_worker:
+        crashed_worker.setattr(tasks, "extract_document", crash_after_fetch)
+        with pytest.raises(SystemExit, match="worker process lost"):
+            worker_bridge.task.run(job.pk, document.pk, document.sha256)
+
+    job.refresh_from_db()
+    assert job.status == Job.Status.RUNNING
+    assert job.attempts == 1
+    assert not document.chunks.exists()
+
+    # Redis/Celery replays the original task with its original retry counter.
+    assert tasks.extract_document is original_extract
+    result = worker_bridge.task.run(job.pk, document.pk, document.sha256)
+    assert result["status"] == "SUCCEEDED"
+    assert worker_bridge.results.submit_callback(job.pk, result) == "duplicate"
+
+    job.refresh_from_db()
+    document.refresh_from_db()
+    assert job.status == Job.Status.SUCCEEDED
+    assert job.attempts == 1
+    assert document.status == Document.Status.READY
+    assert document.chunks.count() == len(result["chunks"]) > 0
+    assert [payload["status"] for payload, _ in worker_bridge.callbacks] == [
+        "RUNNING", "RUNNING", "SUCCEEDED", "SUCCEEDED",
+    ]
+    dispatch.assert_called_once_with(job.pk, document.pk, document.sha256)
+
+
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("suffix,page_count,locations", [
     (".docx", None, [1]),
     (".pptx", 2, [1, 2]),

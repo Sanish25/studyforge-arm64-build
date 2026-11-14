@@ -80,7 +80,7 @@ kind load docker-image studyforge-document-processing:kind \
 The manifest uses `imagePullPolicy: IfNotPresent`, so the loaded local image is
 used instead of pulling from a registry.
 
-## Deploy one worker replica
+## Deploy two worker replicas
 
 ```bash
 kubectl apply -f services/document-processing/kind-worker.yaml
@@ -103,18 +103,27 @@ The registered task must include
 `processing_service.tasks.process_document_task`, and the active queue must
 include `document-processing`.
 
-## Scale from one to two replicas
+## Verify two replicas
 
 Scaling is manual for Phase 1:
 
 ```bash
-kubectl scale deployment/processing-worker --replicas=2
 kubectl rollout status deployment/processing-worker
 kubectl get pods -l app=processing-worker -o wide
 ```
 
 Both Pods consume the same Redis queue. Each task is consumed by one available
-worker; the document is not intentionally processed twice.
+worker; the document is not intentionally processed twice. Confirm both worker
+identities and the shared queue with:
+
+```bash
+kubectl exec deployment/processing-worker -- \
+  celery -A processing_service.celery:app inspect ping --timeout=5
+```
+
+The response must contain two workers. Both must register
+`processing_service.tasks.process_document_task` and subscribe to
+`document-processing`.
 
 ## Verify the real processing path
 

@@ -1,0 +1,28 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: processing-worker-scaler
+  labels:
+    app: processing-worker
+spec:
+  scaleTargetRef:
+    name: processing-worker
+    kind: Deployment
+    apiVersion: apps/v1
+  pollingInterval: 15
+  cooldownPeriod: 150
+  minReplicaCount: 2
+  maxReplicaCount: 10
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 150
+  triggers:
+    - type: redis
+      metadata:
+        address: host.docker.internal:6379
+        databaseIndex: "0"
+        listName: document-processing
+        listLength: "5"
+        activationListLength: "1"

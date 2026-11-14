@@ -14,6 +14,13 @@ from processing_service.source_client import SourceDocument
 
 
 class DocumentTaskTests(SimpleTestCase):
+    def test_task_keeps_the_three_retry_limit(self):
+        self.assertEqual(process_document_task.max_retries, 3)
+        self.assertTrue(app.conf.task_acks_late)
+        self.assertTrue(app.conf.task_reject_on_worker_lost)
+        self.assertEqual(app.conf.worker_prefetch_multiplier, 1)
+        self.assertEqual(app.conf.broker_transport_options["visibility_timeout"], 3600)
+
     def test_task_is_registered_with_standalone_celery_app(self):
         task_name = "processing_service.tasks.process_document_task"
         self.assertIn(task_name, app.tasks)
