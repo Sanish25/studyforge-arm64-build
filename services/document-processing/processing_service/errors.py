@@ -17,5 +17,9 @@ class PermanentProcessingError(ProcessingError):
     """Processing failure that should not be retried."""
 
 
+class DocumentDeletedError(PermanentProcessingError):
+    """Django no longer has the document or job; stop without a failure callback."""
+
+
 class InvalidPDFError(PermanentProcessingError):
     """The source is not a readable, supported PDF."""

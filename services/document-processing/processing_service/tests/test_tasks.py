@@ -7,7 +7,7 @@ from django.test import SimpleTestCase
 
 from processing_service.celery import app
 from processing_service.chunking import TextChunk
-from processing_service.errors import PermanentProcessingError, RetryableProcessingError
+from processing_service.errors import DocumentDeletedError, PermanentProcessingError, RetryableProcessingError
 from processing_service.pdf_parser import ExtractionResult, PageText
 from processing_service.tasks import process_document_task
 from processing_service.source_client import SourceDocument
@@ -112,3 +112,19 @@ class DocumentTaskTests(SimpleTestCase):
             with self.assertRaises(PermanentProcessingError):
                 process_document_task.run(17, 42, "a" * 64)
         fetch.assert_not_called()
+
+    def test_deleted_document_does_not_retry_or_send_a_failed_callback(self):
+        with (
+            patch(
+                "processing_service.tasks.fetch_source_document",
+                side_effect=DocumentDeletedError("Django returned 404"),
+            ),
+            patch.object(process_document_task, "retry") as retry,
+            patch("processing_service.tasks.submit_callback") as callback,
+        ):
+            result = process_document_task.run(17, 42, "a" * 64)
+
+        retry.assert_not_called()
+        self.assertEqual(callback.call_count, 1)
+        self.assertEqual(callback.call_args.args[1]["status"], "RUNNING")
+        self.assertEqual(result["status"], "DELETED")

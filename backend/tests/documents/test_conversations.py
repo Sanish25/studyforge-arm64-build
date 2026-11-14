@@ -83,6 +83,17 @@ def test_course_cascade_removes_conversations_uploads_and_files(owner, course):
     assert chat_storage.exists(other_name)
 
 
+def test_course_cascade_removes_course_material_files(owner, course):
+    material = Document(owner=owner, course=course, title="Material", sha256="c" * 64)
+    material.file.save("material.pdf", ContentFile(b"material"))
+    storage, source_name = material.file.storage, material.file.name
+
+    course.delete()
+
+    assert not Document.objects.filter(pk=material.pk).exists()
+    assert not storage.exists(source_name)
+
+
 def test_storage_failure_rolls_back_conversation_cascade(owner, course):
     conversation = Conversation.objects.create(owner=owner, course=course)
     upload = Document(owner=owner, conversation=conversation, title="Chat", sha256="a" * 64)

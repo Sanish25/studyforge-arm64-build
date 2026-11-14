@@ -7,7 +7,7 @@ from urllib.error import HTTPError
 
 from django.test import SimpleTestCase, override_settings
 
-from processing_service.errors import PermanentProcessingError, RetryableProcessingError
+from processing_service.errors import DocumentDeletedError, PermanentProcessingError, RetryableProcessingError
 from processing_service.source_client import MAX_PDF_BYTES, fetch_source_document, fetch_source_pdf
 
 
@@ -130,7 +130,7 @@ class SourceClientTests(SimpleTestCase):
                     None,
                 )
                 with patch("processing_service.source_client.build_opener", return_value=opener):
-                    with self.assertRaises(PermanentProcessingError):
+                    with self.assertRaises(DocumentDeletedError if status == 404 else PermanentProcessingError):
                         fetch_source_pdf(19, 42, SOURCE_SHA256)
 
     def test_does_not_follow_redirects(self):

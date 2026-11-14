@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from io import BytesIO
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 from django.test import SimpleTestCase, override_settings
 
@@ -55,6 +56,14 @@ class ResultClientTests(SimpleTestCase):
             side_effect=TimeoutError("Django timed out"),
         ):
             with self.assertRaises(RetryableProcessingError):
+                submit_callback(17, {"schema_version": 1, "job_id": 17, "status": "RUNNING"})
+
+    def test_deleted_document_callback_is_permanent_and_not_retryable(self):
+        with patch(
+            "processing_service.result_client.urlopen",
+            side_effect=HTTPError("http://django/internal", 404, "deleted", {}, None),
+        ):
+            with self.assertRaises(PermanentProcessingError):
                 submit_callback(17, {"schema_version": 1, "job_id": 17, "status": "RUNNING"})
 
     def test_invalid_callback_response_fails_explicitly(self):

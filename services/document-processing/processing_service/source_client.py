@@ -11,7 +11,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from django.conf import settings
 
-from .errors import PermanentProcessingError, ProcessingError, RetryableProcessingError
+from .errors import DocumentDeletedError, PermanentProcessingError, ProcessingError, RetryableProcessingError
 
 MAX_PDF_BYTES = 20 * 1024 * 1024
 MAX_DOCUMENT_BYTES = MAX_PDF_BYTES
@@ -117,6 +117,8 @@ def fetch_source_document(job_id: int, document_id: int, source_sha256: str) -> 
 
 
 def _response_error(status: int) -> ProcessingError:
+    if status == 404:
+        return DocumentDeletedError("Django no longer has this document or job.")
     if status in {408, 429} or status >= 500:
         return RetryableProcessingError(
             f"Django source retrieval failed with HTTP status {status}."

@@ -8,7 +8,7 @@ from celery import shared_task
 
 from .chunking import chunk_pages
 from .embedding_service import embed_texts
-from .errors import PermanentProcessingError, RetryableProcessingError
+from .errors import DocumentDeletedError, PermanentProcessingError, RetryableProcessingError
 from .document_parser import extract_document
 from .result_client import submit_callback
 from .source_client import fetch_source_document
@@ -46,6 +46,10 @@ def process_document_task(
         extraction = extract_document(source.content, source.mime_type)
         chunks = chunk_pages(extraction.pages)
         embeddings = embed_texts([chunk.content for chunk in chunks])
+    except DocumentDeletedError:
+        # A user deletion is terminal. Do not retry or send a FAILED callback
+        # for a document that no longer exists.
+        return {**identity, "status": "DELETED"}
     except RetryableProcessingError as exc:
         if self.request.retries < TASK_MAX_RETRIES:
             raise self.retry(exc=exc, countdown=TASK_RETRY_COUNTDOWN_SECONDS)
