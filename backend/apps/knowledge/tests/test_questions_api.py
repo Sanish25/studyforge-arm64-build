@@ -285,6 +285,17 @@ class QuestionsAPITests(TestCase):
         self.assertNotIn("SECRET", result.content.decode())
         self.assertEqual(self.sdk.chat.completions.create.call_count, 2)
 
+    def test_invalid_citation_can_be_repaired_with_supported_uncited_answer(self):
+        invented = {**self.answer, "citations": [{**self.citation(self.chunk), "excerpt": "invented SECRET"}]}
+        uncited = {**self.answer, "citations": []}
+        self.sdk.chat.completions.create.side_effect = [completion(invented), completion(uncited)]
+        result = self.post()
+        self.assertEqual(result.status_code, 200, result.data)
+        self.assertEqual(result.json(), uncited)
+        self.assertNotIn("SECRET", result.content.decode())
+        self.assertEqual(self.sdk.chat.completions.create.call_count, 2)
+        self.embed.assert_called_once()
+
     def test_unrepaired_citation_is_never_returned(self):
         invented = {**self.answer, "citations": [{**self.citation(self.chunk), "excerpt": "invented SECRET"}]}
         self.sdk.chat.completions.create.side_effect = [completion(invented), completion(invented),

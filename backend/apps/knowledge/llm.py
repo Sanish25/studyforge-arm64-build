@@ -41,11 +41,12 @@ return status INSUFFICIENT_CONTEXT, answer null, and citations []."""
 # instruction, so it rides in a system message, never inside the data envelope.
 CITATION_REPAIR_PROMPT = """Your previous response was rejected because a citation
 did not match its passage. Answer again from the same passages.
-Every citation excerpt must be copied verbatim except for whitespace formatting
-from the content of the passage identified by its chunk_id. Whitespace may differ,
-Do not paraphrase, reword, abbreviate, join, or correct excerpts. Cite only the supplied chunk_id,
-document_id, and page_number values. If you cannot produce an exact supporting
-citation, return status INSUFFICIENT_CONTEXT, answer null, and citations []."""
+Every provided citation excerpt must be copied verbatim except for whitespace formatting
+from the content of the passage identified by its chunk_id. Do not paraphrase,
+reword, abbreviate, join, or correct excerpts. Cite only the supplied chunk_id,
+document_id, and page_number values. If the passages support the answer, return
+status ANSWERED with that answer; citations may be []. If the passages do not
+support an answer, return status INSUFFICIENT_CONTEXT, answer null, and citations []."""
 
 ANSWER_SCHEMA = {
     "type": "object",

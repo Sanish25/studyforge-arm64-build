@@ -228,6 +228,12 @@ class OpenAIRAGTests(SimpleTestCase):
         for rule in ("copied verbatim", "Do not paraphrase", "Cite only the supplied", "INSUFFICIENT_CONTEXT"):
             self.assertIn(rule, CITATION_REPAIR_PROMPT)
 
+    def test_repair_prompt_allows_supported_uncited_answer_and_requires_unsupported_abstention(self):
+        self.assertIn("If the passages support the answer, return\nstatus ANSWERED", CITATION_REPAIR_PROMPT)
+        self.assertIn("citations may be []", CITATION_REPAIR_PROMPT)
+        self.assertIn("If the passages do not\nsupport an answer, return status INSUFFICIENT_CONTEXT, answer null, and citations []", CITATION_REPAIR_PROMPT)
+        self.assertNotIn("If you cannot produce an exact supporting\ncitation", CITATION_REPAIR_PROMPT)
+
     def test_repair_may_abstain(self):
         invented = {**ANSWER, "citations": [{**ANSWER["citations"][0], "excerpt": "invented quote"}]}
         sdk = Mock()
