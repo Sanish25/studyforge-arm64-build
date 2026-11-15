@@ -104,7 +104,7 @@ class RAGGenerationTests(SimpleTestCase):
         bad = [None, [], {}, {**ANSWER, "extra": "unexpected"},
                {**ANSWER, "status": "UNKNOWN"}, {**ANSWER, "answer": " "},
                {**ANSWER, "answer": 1}, {**ANSWER, "answer": "x" * 8001},
-               {**ANSWER, "citations": []}, {**ANSWER, "citations": {}},
+               {**ANSWER, "citations": {}},
                {**ABSTENTION, "answer": "unsupported"},
                {**ABSTENTION, "citations": ANSWER["citations"]}]
         for changes in (
@@ -197,7 +197,7 @@ class OpenAIRAGTests(SimpleTestCase):
                response(raw='{"status":"ANSWERED","status":"INSUFFICIENT_CONTEXT","answer":null,"citations":[]}'),
                response(finish_reason="length"), response(finish_reason="content_filter"),
                response(refusal="SECRET refusal"), SimpleNamespace(choices=[]), None,
-               response(payload={**ANSWER, "citations": []})]
+               response(payload={**ANSWER, "answer": None})]
         no_content = response()
         no_content.choices[0].message.content = None
         bad.append(no_content)
@@ -235,6 +235,14 @@ class OpenAIRAGTests(SimpleTestCase):
         self.assertEqual(generate_answer("question", PASSAGES, OpenAIRAGLLM(sdk)), ABSTENTION)
         self.assertEqual(sdk.chat.completions.create.call_count, 2)
 
+    def test_repair_may_return_supported_answer_without_citations(self):
+        invented = {**ANSWER, "citations": [{**ANSWER["citations"][0], "excerpt": "invented quote"}]}
+        uncited = {**ANSWER, "citations": []}
+        sdk = Mock()
+        sdk.chat.completions.create.side_effect = [response(invented), response(uncited)]
+        self.assertEqual(generate_answer("question", PASSAGES, OpenAIRAGLLM(sdk)), uncited)
+        self.assertEqual(sdk.chat.completions.create.call_count, 2)
+
     def test_second_invalid_response_fails_without_another_retry(self):
         invented = {**ANSWER, "citations": [{**ANSWER["citations"][0], "excerpt": "invented SECRET quote"}]}
         for second in (response(invented),
@@ -257,12 +265,38 @@ class OpenAIRAGTests(SimpleTestCase):
             generate_answer("question", PASSAGES, OpenAIRAGLLM(sdk))
         self.assertEqual(sdk.chat.completions.create.call_count, 2)
 
+    def test_answer_without_citations_is_validated_against_retrieved_chunks(self):
+        uncited = {**ANSWER, "citations": []}
+        sdk = Mock()
+        sdk.chat.completions.create.return_value = response(uncited)
+        self.assertEqual(generate_answer("question", PASSAGES, OpenAIRAGLLM(sdk)), uncited)
+        sdk.chat.completions.create.assert_called_once()
+        request = sdk.chat.completions.create.call_args.kwargs
+        submitted = json.loads(request["messages"][1]["content"])
+        self.assertEqual(
+            submitted["passages"],
+            [{key: passage[key] for key in ("chunk_id", "document_id", "page_number", "content")} for passage in PASSAGES],
+        )
+
+    def test_citation_matching_ignores_whitespace_layout_but_not_text_changes(self):
+        formatted = {**ANSWER, "citations": [{**ANSWER["citations"][0],
+            "excerpt": "requested page is\nnot in RAM"}]}
+        sdk = Mock()
+        sdk.chat.completions.create.return_value = response(formatted)
+        self.assertEqual(generate_answer("question", PASSAGES, OpenAIRAGLLM(sdk)), formatted)
+
+        invalid = {**ANSWER, "citations": [{**ANSWER["citations"][0],
+            "excerpt": "requested page is not in memory"}]}
+        sdk.chat.completions.create.return_value = response(invalid)
+        with self.assertRaises(InvalidLLMOutput):
+            generate_answer("question", PASSAGES, OpenAIRAGLLM(sdk))
+
     def test_valid_or_non_citation_failures_are_not_retried(self):
         sdk = Mock()
         sdk.chat.completions.create.return_value = response(ANSWER)
         self.assertEqual(generate_answer("question", PASSAGES, OpenAIRAGLLM(sdk)), ANSWER)
         sdk.chat.completions.create.assert_called_once()
-        for bad in (response(raw="not JSON"), response({**ANSWER, "citations": []}),
+        for bad in (response(raw="not JSON"),
                     response({**ANSWER, "status": "UNKNOWN"}), response(finish_reason="length"),
                     response({**ANSWER, "citations": [{**ANSWER["citations"][0], "excerpt": " "}]})):
             with self.subTest(response=bad):
