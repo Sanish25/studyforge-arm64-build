@@ -73,3 +73,11 @@ class ResultClientTests(SimpleTestCase):
         with patch("processing_service.result_client.urlopen", return_value=response):
             with self.assertRaises(PermanentProcessingError):
                 submit_callback(17, {"schema_version": 1, "job_id": 17, "status": "RUNNING"})
+
+    def test_callback_transport_rejects_redirects(self):
+        from processing_service.result_client import urlopen
+        from processing_service.source_client import _RejectRedirects
+        with patch("processing_service.result_client.build_opener") as opener:
+            urlopen("request", timeout=30)
+        self.assertIsInstance(opener.call_args.args[0], _RejectRedirects)
+        opener.return_value.open.assert_called_once_with("request", timeout=30)

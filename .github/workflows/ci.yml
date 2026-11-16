@@ -65,6 +65,9 @@ jobs:
           GOOGLE_APPLICATION_CREDENTIALS: ""
         run: python scripts/check.py --component backend --database service
 
+      - name: Run processing service checks
+        run: python scripts/check.py --component processing --database service
+
       - name: Upload backend test results
         if: always()
         uses: actions/upload-artifact@v4

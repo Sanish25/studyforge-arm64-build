@@ -8,6 +8,7 @@ from redis import Redis
 from redis.exceptions import RedisError
 
 from executions.models import Execution
+from .object_storage import client as object_client
 
 
 def response(body, status=200):
@@ -36,6 +37,12 @@ def ready(_request):
             client.ping()
     except (RedisError, ValueError):
         dependencies["redis"] = "unavailable"
+    if settings.PROCESSING_SOURCE_MODE == "s3":
+        dependencies["storage"] = "ok"
+        try:
+            object_client().head_bucket(Bucket=settings.PROCESSING_STORAGE_BUCKET)
+        except Exception:
+            dependencies["storage"] = "unavailable"
     healthy = all(value == "ok" for value in dependencies.values())
     return response(
         {"status": "ok" if healthy else "unavailable", "dependencies": dependencies},

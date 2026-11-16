@@ -1,5 +1,8 @@
 # Document Processing foundation — SCRUM-97
 
+For SCRUM-127 production S3 mode, storage credentials, health probes, and
+restart/cutover steps, see [production document storage](../../docs/deployment/production-document-storage.md).
+
 This directory is the independent service foundation described in the
 [Sprint 2 contract](../../docs/architecture/document-processing-contract.md).
 It has its own Django project, dependencies, migration, database, container image,

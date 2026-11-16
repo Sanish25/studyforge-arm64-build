@@ -247,3 +247,33 @@ class InternalJobDocumentViewTests(TransactionTestCase):
         self.assertNotIn("/private/storage/path", response.content.decode())
         self.assertNotIn("/private/storage/path", " ".join(logs.output))
         self.assertNotIn("Traceback", " ".join(logs.output))
+
+    @override_settings(PROCESSING_SERVICE_TOKEN="test-service-token", DOCUMENT_STORAGE_BACKEND="s3")
+    def test_object_reference_requires_service_auth_and_keeps_stable_key(self):
+        url = reverse("internal-job-object", args=[self.job.pk])
+        unauthenticated = self.client.get(url)
+        self.assertEqual(unauthenticated.status_code, 401)
+        self.assertNotIn("object_key", unauthenticated.content.decode())
+        invalid = self.client.get(url, HTTP_AUTHORIZATION="Bearer wrong-token")
+        self.assertEqual(invalid.status_code, 401)
+        authorized = self.client.get(url, HTTP_AUTHORIZATION="Bearer test-service-token")
+        self.assertEqual(authorized.status_code, 200)
+        self.assertEqual(authorized.json(), {
+            "document_id": self.job.document_id,
+            "source_sha256": self.job.document.sha256,
+            "object_key": "documents/lecture.pdf",
+            "mime_type": "application/pdf",
+        })
+        self.assertEqual(authorized["Cache-Control"], "no-store")
+        self.job.document.refresh_from_db()
+        self.assertEqual(self.job.document.file.name, authorized.json()["object_key"])
+
+    @override_settings(PROCESSING_SERVICE_TOKEN="test-service-token", DOCUMENT_STORAGE_BACKEND="s3")
+    def test_superseded_job_cannot_obtain_object_reference(self):
+        Job.objects.create(document=self.job.document)
+        response = self.client.get(
+            reverse("internal-job-object", args=[self.job.pk]),
+            HTTP_AUTHORIZATION="Bearer test-service-token",
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertNotIn("object_key", response.content.decode())

@@ -269,16 +269,16 @@ malformed, empty, and zero-page PDFs are rejected without text extraction.
 Responses and error codes follow [the API contract](docs/api-contract.md).
 
 Uploads default to the ignored `backend/media/` directory; `MEDIA_ROOT` can
-override it. Files are private: no public media URL is registered. The API and
-processing worker must use the same storage and PostgreSQL database.
+override it. Production can select private S3-compatible storage through Django's
+`FileField`; see [production document storage](docs/deployment/production-document-storage.md).
+No public media URL is registered. The standalone worker uses authenticated
+Django retrieval locally or its own read-only object access in production.
 
-Set `CELERY_BROKER_URL` to the same broker as Person 4's worker (default
+Set `CELERY_BROKER_URL` to the standalone processing worker's broker (local default
 `redis://127.0.0.1:6379/0`). The API publishes
-`apps.processing.tasks.process_document_task` with one positional `document_id`
-after committing the Document and its initial queued Job. It does not execute
-processing, start a worker, or retry publication. Job attempts and worker-side
-Job transitions remain Person 4's responsibility; the API marks its Job failed
-only when dispatch definitely fails.
+`processing_service.tasks.process_document_task` with `job_id`, `document_id`,
+and `source_sha256` after committing the Document and Job. Django marks a Job
+failed only when dispatch definitely fails.
 
 An unavailable broker returns the contract's `503` with the saved document ID;
 the file is retained. An uncertain send leaves the document state unchanged.

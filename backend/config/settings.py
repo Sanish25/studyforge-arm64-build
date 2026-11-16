@@ -2,10 +2,12 @@
 
 import os
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 from datetime import timedelta
 
 from dotenv import load_dotenv
+from django.core.exceptions import ImproperlyConfigured
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -97,6 +99,11 @@ if os.environ.get("DATABASE_ENGINE", "postgresql") == "sqlite3":
         }
     }
 else:
+    _postgres_options = {"connect_timeout": int(os.environ.get("POSTGRES_CONNECT_TIMEOUT", "3"))}
+    if os.environ.get("POSTGRES_SSLMODE"):
+        _postgres_options["sslmode"] = os.environ["POSTGRES_SSLMODE"]
+    if os.environ.get("POSTGRES_SSLROOTCERT"):
+        _postgres_options["sslrootcert"] = os.environ["POSTGRES_SSLROOTCERT"]
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.postgresql",
@@ -105,6 +112,7 @@ else:
             "PASSWORD": os.environ.get("POSTGRES_PASSWORD", "studyforge_dev"),
             "HOST": os.environ.get("POSTGRES_HOST", "localhost"),
             "PORT": os.environ.get("POSTGRES_PORT", "5432"),
+            "OPTIONS": _postgres_options,
         }
     }
 
@@ -136,9 +144,72 @@ STATIC_ROOT = Path(os.environ.get("STATIC_ROOT", str(BASE_DIR / "staticfiles")))
 
 # Private uploads: no public media route is registered.
 MEDIA_ROOT = Path(os.environ.get("MEDIA_ROOT", str(BASE_DIR / "media")))
+DOCUMENT_STORAGE_BACKEND = os.environ.get("DOCUMENT_STORAGE_BACKEND", "filesystem").strip().lower()
+if DOCUMENT_STORAGE_BACKEND not in {"filesystem", "s3"}:
+    raise ImproperlyConfigured("DOCUMENT_STORAGE_BACKEND must be filesystem or s3.")
+STORAGES = {
+    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+}
+if DOCUMENT_STORAGE_BACKEND == "s3":
+    from botocore.config import Config
+
+    bucket = os.environ.get("DOCUMENT_STORAGE_BUCKET", "").strip()
+    region = os.environ.get("DOCUMENT_STORAGE_REGION", "").strip()
+    endpoint = os.environ.get("DOCUMENT_STORAGE_ENDPOINT_URL", "").strip()
+    access_key = os.environ.get("DOCUMENT_STORAGE_ACCESS_KEY_ID", "").strip()
+    secret_key = os.environ.get("DOCUMENT_STORAGE_SECRET_ACCESS_KEY", "").strip()
+    if not bucket or not region or bool(access_key) != bool(secret_key):
+        raise ImproperlyConfigured("S3 storage needs a bucket, region, and a complete credential pair if keys are used.")
+    if endpoint:
+        parsed = urlsplit(endpoint)
+        if not parsed.netloc or parsed.scheme not in {"https", "http"} or parsed.username or parsed.password:
+            raise ImproperlyConfigured("DOCUMENT_STORAGE_ENDPOINT_URL is invalid.")
+        if parsed.scheme == "http" and not _env_bool("DOCUMENT_STORAGE_ALLOW_HTTP"):
+            raise ImproperlyConfigured("S3 storage requires HTTPS unless local HTTP is explicitly enabled.")
+    addressing_style = os.environ.get("DOCUMENT_STORAGE_ADDRESSING_STYLE", "path" if endpoint else "auto").strip()
+    if addressing_style not in {"auto", "path", "virtual"}:
+        raise ImproperlyConfigured("DOCUMENT_STORAGE_ADDRESSING_STYLE is invalid.")
+    options = {
+        "bucket_name": bucket,
+        "region_name": region,
+        "default_acl": None,
+        "querystring_auth": True,
+        "file_overwrite": False,
+        "client_config": Config(
+            connect_timeout=int(os.environ.get("DOCUMENT_STORAGE_CONNECT_TIMEOUT", "3")),
+            read_timeout=int(os.environ.get("DOCUMENT_STORAGE_READ_TIMEOUT", "10")),
+            retries={"max_attempts": 2},
+            s3={"addressing_style": addressing_style},
+        ),
+    }
+    if endpoint:
+        options["endpoint_url"] = endpoint
+    if access_key:
+        options.update(access_key=access_key, secret_key=secret_key)
+    if os.environ.get("DOCUMENT_STORAGE_SESSION_TOKEN"):
+        options["security_token"] = os.environ["DOCUMENT_STORAGE_SESSION_TOKEN"]
+    if os.environ.get("DOCUMENT_STORAGE_CA_BUNDLE"):
+        options["verify"] = os.environ["DOCUMENT_STORAGE_CA_BUNDLE"]
+    STORAGES["default"] = {"BACKEND": "storages.backends.s3.S3Storage", "OPTIONS": options}
 
 # Producer configuration only. Person 4 owns the worker and task implementation.
 CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://127.0.0.1:6379/0")
+if _env_bool("STUDYFORGE_REQUIRE_SECURE_CONNECTIONS"):
+    if DEBUG or not os.environ.get("DJANGO_SECRET_KEY") or not os.environ.get("DJANGO_ALLOWED_HOSTS") or not os.environ.get("POSTGRES_PASSWORD"):
+        raise ImproperlyConfigured("Production Django requires DEBUG off, a secret key, allowed hosts, and a database password from the environment.")
+    if DATABASES["default"]["ENGINE"] != "django.db.backends.postgresql" or _postgres_options.get("sslmode") != "verify-full":
+        raise ImproperlyConfigured("Production PostgreSQL requires POSTGRES_SSLMODE=verify-full.")
+    if not CELERY_BROKER_URL.startswith("rediss://"):
+        raise ImproperlyConfigured("Production Redis requires a rediss:// broker URL.")
+    if parse_qs(urlsplit(CELERY_BROKER_URL).query).get("ssl_cert_reqs") != ["required"]:
+        raise ImproperlyConfigured("Production Redis requires ssl_cert_reqs=required.")
+    if DOCUMENT_STORAGE_BACKEND != "s3":
+        raise ImproperlyConfigured("Production document storage requires S3.")
+    if not os.environ.get("PROCESSING_SERVICE_TOKEN"):
+        raise ImproperlyConfigured("Production Django requires PROCESSING_SERVICE_TOKEN.")
+    if os.environ.get("DOCUMENT_STORAGE_ENDPOINT_URL", "").startswith("http://"):
+        raise ImproperlyConfigured("Production document storage requires HTTPS.")
 # Gemini embeddings. The key is required only when an embedding call runs.
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "gemini-embedding-2")

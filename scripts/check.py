@@ -16,6 +16,7 @@ SUITES = {
     "all": ["backend/apps", "backend/tests"],
     "identity-courses": ["backend/tests/users", "backend/apps/courses"],
     "documents": ["backend/tests/documents", "backend/apps/documents"],
+    "s3-integration": ["backend/tests/documents/test_s3_process_integration.py"],
     "ai-learning": ["backend/apps/processing", "backend/apps/knowledge", "backend/apps/notes", "backend/apps/quizzes"],
 }
 
@@ -29,10 +30,11 @@ def test_environment():
     ):
         env.pop(key, None)
     env.update(
-        NOTES_LLM_BACKEND="fake", QUIZ_LLM_BACKEND="fake", DJANGO_SETTINGS_MODULE="config.test_settings",
+        NOTES_LLM_BACKEND="fake", QUIZ_LLM_BACKEND="fake", RAG_LLM_BACKEND="fake", DJANGO_SETTINGS_MODULE="config.test_settings",
         DATABASE_ENGINE="postgresql", EMBEDDING_DIMENSION="768",
         EMBEDDING_BATCH_SIZE="16", EMBEDDING_MODEL="gemini-embedding-2",
         VITE_API_BASE_URL="http://api.test/api/v1",
+        DOCUMENT_STORAGE_BACKEND="filesystem", STUDYFORGE_REQUIRE_SECURE_CONNECTIONS="0",
     )
     return env
 
@@ -140,6 +142,34 @@ def backend(env, mode, suite):
             return [run(label, [sys.executable, *args], env) for label, args in commands]
 
 
+def processing(env, mode):
+    """Run standalone service tests against a separate disposable database."""
+    if sys.version_info[:2] != (3, 12):
+        raise RuntimeError("Processing checks require Python 3.12.")
+    env = env.copy()
+    env["DJANGO_SETTINGS_MODULE"] = "processing_service.settings"
+    env["PROCESSING_SECRET_KEY"] = "disposable-test-only"
+    env["PROCESSING_SERVICE_TOKEN"] = "disposable-test-token"
+    env["PROCESSING_DJANGO_API_URL"] = "https://api.example.test"
+    env["PROCESSING_SOURCE_MODE"] = "django"
+    env["PROCESSING_REQUIRE_DIRECT_STORAGE"] = "0"
+    env["PROCESSING_REDIS_URL"] = "redis://127.0.0.1:6379/0"
+    env["PROCESSING_DB_SSLMODE"] = ""
+    env["PROCESSING_DB_SSLROOTCERT"] = ""
+    with database(env, mode):
+        env["PROCESSING_DB_NAME"] = env["STUDYFORGE_TEST_DB_NAME"]
+        env["PROCESSING_DB_USER"] = env["STUDYFORGE_TEST_DB_USER"]
+        env["PROCESSING_DB_PASSWORD"] = env["STUDYFORGE_TEST_DB_PASSWORD"]
+        env["PROCESSING_DB_HOST"] = env["STUDYFORGE_TEST_DB_HOST"]
+        env["PROCESSING_DB_PORT"] = env["STUDYFORGE_TEST_DB_PORT"]
+        commands = [
+            ("Processing system checks", ["manage.py", "check"]),
+            ("Processing migration drift", ["manage.py", "makemigrations", "--check", "--dry-run"]),
+            ("Processing tests", ["manage.py", "test", "executions", "processing_service.tests", "--verbosity", "1"]),
+        ]
+        return [run(label, [sys.executable, *args], env, ROOT / "services" / "document-processing") for label, args in commands]
+
+
 def frontend(env):
     node = shutil.which("node")
     npm = shutil.which("npm.cmd" if os.name == "nt" else "npm")
@@ -160,7 +190,7 @@ def frontend(env):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--component", choices=("all", "backend", "frontend"), default="all")
+    parser.add_argument("--component", choices=("all", "backend", "processing", "frontend"), default="all")
     parser.add_argument("--suite", choices=SUITES, default="all", help="Backend domain subset; CI always uses all.")
     parser.add_argument("--database", choices=("docker", "service"), default="docker")
     args = parser.parse_args()
@@ -169,6 +199,8 @@ def main():
     try:
         if args.component in ("all", "backend"):
             results.extend(backend(env, args.database, args.suite))
+        if args.component == "processing":
+            results.extend(processing(env, args.database))
         if args.component in ("all", "frontend"):
             results.extend(frontend(env))
     except (RuntimeError, ImportError, OSError, subprocess.SubprocessError) as exc:

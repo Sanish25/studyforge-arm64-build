@@ -10,6 +10,7 @@ entries over rewriting history.
 | File | Purpose |
 |------|---------|
 | [backend-oracle-deployment.md](./backend-oracle-deployment.md) | SCRUM-125: Django backend, Postgres + pgvector, and Redis on Oracle OCI |
+| [production-document-storage.md](./production-document-storage.md) | SCRUM-127: private object storage, service connections, cutover, and probes |
 
 ## How to update
 

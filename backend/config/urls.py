@@ -1,6 +1,7 @@
 """StudyForge URL configuration."""
 
-from apps.documents.internal_views import InternalJobDocumentView, InternalJobResultView
+from apps.documents.internal_views import InternalJobDocumentView, InternalJobObjectView, InternalJobResultView
+from config.health import live, ready
 from apps.users.views import (
     GoogleLoginView,
     LoginView,
@@ -11,21 +12,22 @@ from apps.users.views import (
     csrf_cookie,
 )
 from django.contrib import admin
-from django.http import JsonResponse
 from django.urls import include, path
-
-
-def health(_request):
-    return JsonResponse({"status": "ok"})
 
 
 urlpatterns = [
     path("admin/", admin.site.urls),
-    path("api/v1/health/", health),
+    path("api/v1/health/", live),
+    path("api/v1/ready/", ready),
     path(
         "internal/v1/jobs/<str:job_id>/document/",
         InternalJobDocumentView.as_view(),
         name="internal-job-document",
+    ),
+    path(
+        "internal/v1/jobs/<str:job_id>/object/",
+        InternalJobObjectView.as_view(),
+        name="internal-job-object",
     ),
     path(
         "internal/v1/jobs/<int:job_id>/result/",

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin
-from urllib.request import Request, urlopen
+from urllib.request import Request, build_opener
 
 from django.conf import settings
 
@@ -13,6 +13,13 @@ from .errors import OversizedCallbackError, PermanentProcessingError, Processing
 
 MAX_RESULT_BYTES = 2 * 1024 * 1024
 RESULT_TIMEOUT_SECONDS = 30
+
+
+def urlopen(request, timeout):
+    """Do not forward the internal Bearer token to a redirect target."""
+    from .source_client import _RejectRedirects
+
+    return build_opener(_RejectRedirects()).open(request, timeout=timeout)
 
 
 def submit_callback(job_id: int, payload: dict) -> str:

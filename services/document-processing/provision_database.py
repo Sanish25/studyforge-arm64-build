@@ -41,6 +41,10 @@ def provision():
         "connect_timeout": 5,
         "autocommit": True,
     }
+    if os.environ.get("PROCESSING_DB_SSLMODE"):
+        connection_options["sslmode"] = os.environ["PROCESSING_DB_SSLMODE"]
+    if os.environ.get("PROCESSING_DB_SSLROOTCERT"):
+        connection_options["sslrootcert"] = os.environ["PROCESSING_DB_SSLROOTCERT"]
     with psycopg.connect(dbname="postgres", **connection_options) as connection:
         existing_db = connection.execute(
             "SELECT pg_get_userbyid(datdba), shobj_description(oid, 'pg_database') "

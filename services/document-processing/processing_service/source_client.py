@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
@@ -10,7 +11,9 @@ from urllib.parse import urljoin
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from django.conf import settings
+from botocore.exceptions import BotoCoreError, ClientError
 
+from .object_storage import client as object_client
 from .errors import DocumentDeletedError, PermanentProcessingError, ProcessingError, RetryableProcessingError
 
 MAX_PDF_BYTES = 20 * 1024 * 1024
@@ -59,6 +62,9 @@ def fetch_source_document(job_id: int, document_id: int, source_sha256: str) -> 
         raise PermanentProcessingError("PROCESSING_SERVICE_TOKEN is not configured.")
     if not base_url.startswith(("https://", "http://")):
         raise PermanentProcessingError("PROCESSING_DJANGO_API_URL must use HTTP or HTTPS.")
+
+    if getattr(settings, "PROCESSING_SOURCE_MODE", "django") == "s3":
+        return _fetch_object_source(base_url, token, job_id, document_id, source_sha256)
 
     url = urljoin(
         base_url.rstrip("/") + "/",
@@ -114,6 +120,42 @@ def fetch_source_document(job_id: int, document_id: int, source_sha256: str) -> 
     if hashlib.sha256(source_bytes).hexdigest() != source_sha256:
         raise PermanentProcessingError("The source document digest does not match the job.")
     return SourceDocument(source_bytes, mime_type)
+
+
+def _fetch_object_source(base_url, token, job_id, document_id, source_sha256):
+    locator_url = urljoin(base_url.rstrip("/") + "/", f"internal/v1/jobs/{job_id}/object/")
+    request = Request(locator_url, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"}, method="GET")
+    try:
+        with build_opener(_RejectRedirects()).open(request, timeout=SOURCE_TIMEOUT_SECONDS) as response:
+            if response.status != 200:
+                raise _response_error(response.status)
+            locator = json.loads(response.read(4096))
+    except HTTPError as exc:
+        raise _response_error(exc.code) from exc
+    except (URLError, TimeoutError, OSError) as exc:
+        raise RetryableProcessingError("Could not retrieve the source reference from Django.") from exc
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise PermanentProcessingError("Django returned an invalid source reference.") from exc
+    if not isinstance(locator, dict) or set(locator) != {"document_id", "source_sha256", "object_key", "mime_type"}:
+        raise PermanentProcessingError("Django returned an invalid source reference.")
+    key = locator["object_key"]
+    mime_type = locator["mime_type"]
+    if (locator["document_id"] != document_id or locator["source_sha256"] != source_sha256
+        or not isinstance(key, str) or not key.startswith("documents/") or ".." in key.split("/")
+        or mime_type not in SOURCE_MIMES):
+        raise PermanentProcessingError("Django returned a different or invalid source reference.")
+    try:
+        result = object_client().get_object(Bucket=settings.PROCESSING_STORAGE_BUCKET, Key=key)
+        body = result["Body"]
+        try:
+            content = body.read(MAX_DOCUMENT_BYTES + 1)
+        finally:
+            body.close()
+    except (BotoCoreError, ClientError, OSError) as exc:
+        raise RetryableProcessingError("Could not retrieve the source object.") from exc
+    if not content or len(content) > MAX_DOCUMENT_BYTES or hashlib.sha256(content).hexdigest() != source_sha256:
+        raise PermanentProcessingError("The source object is invalid or does not match the job.")
+    return SourceDocument(content, mime_type)
 
 
 def _response_error(status: int) -> ProcessingError:

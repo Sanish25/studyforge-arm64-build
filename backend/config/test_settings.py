@@ -24,6 +24,8 @@ DATABASES = {
     }
 }
 MEDIA_ROOT = _media_root
+DOCUMENT_STORAGE_BACKEND = "filesystem"
+STORAGES["default"] = {"BACKEND": "django.core.files.storage.FileSystemStorage"}
 os.environ["NOTES_LLM_BACKEND"] = "fake"
 os.environ["QUIZ_LLM_BACKEND"] = "fake"
 for _key in ("OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS"):

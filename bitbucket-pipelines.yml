@@ -28,6 +28,7 @@ definitions:
           - export NOTES_LLM_BACKEND=fake QUIZ_LLM_BACKEND=fake
           - unset OPENAI_API_KEY GEMINI_API_KEY GOOGLE_API_KEY GOOGLE_APPLICATION_CREDENTIALS
           - python scripts/check.py --component backend --database service
+          - python scripts/check.py --component processing --database service
         artifacts:
           - test-results/**
     - step: &frontend
