@@ -1,8 +1,9 @@
 import { QUIZ_LENGTHS, type QuizLength } from "../../types/quiz";
-import type { TrackedDocument } from "../../types/document";
+import type { MaterialsLoadState, TrackedDocument } from "../../types/document";
 import type { QuizMode } from "../../types/survival";
 import { materialReferences, reconcileSelection, selectedDocumentIds } from "../chat/chatReferences";
 import MaterialPicker from "../documents/MaterialPicker";
+import GoToMaterialsLink from "../courses/GoToMaterialsLink";
 import "./survival.css";
 
 const MODES: { value: QuizMode; label: string; hint: string }[] = [
@@ -11,6 +12,8 @@ const MODES: { value: QuizMode; label: string; hint: string }[] = [
 ];
 
 type Props = {
+  courseId: number;
+  materialsState: MaterialsLoadState;
   mode: QuizMode;
   onModeChange: (mode: QuizMode) => void;
   materials: TrackedDocument[];
@@ -23,7 +26,7 @@ type Props = {
   onGenerate: (documentIds: number[]) => void;
 };
 
-export default function QuizSetup({ mode, onModeChange, materials, selected, onSelectedChange, length, onLengthChange, busy, error, onGenerate }: Props) {
+export default function QuizSetup({ courseId, materialsState, mode, onModeChange, materials, selected, onSelectedChange, length, onLengthChange, busy, error, onGenerate }: Props) {
   const references = materialReferences(materials);
   // Re-derived on every render, so a material that was deleted or stopped
   // being READY drops out of the selection without any extra effect.
@@ -49,8 +52,9 @@ export default function QuizSetup({ mode, onModeChange, materials, selected, onS
       </div>
     </fieldset>
 
-    <MaterialPicker materials={materials} selected={effective} onSelectedChange={onSelectedChange} disabled={busy}
-      emptyMessage="Upload a material in the Materials tab to create a quiz."
+    <MaterialPicker materials={materials} state={materialsState} selected={effective} onSelectedChange={onSelectedChange} disabled={busy}
+      emptyMessage="No materials yet. Upload one in Materials to create a quiz."
+      emptyAction={<GoToMaterialsLink courseId={courseId} />}
       notReadyMessage="None of your materials are ready yet. Quizzes can be generated once processing finishes." />
 
     <fieldset disabled={busy}>

@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { listCourses } from "../../api/courses";
 import { ApiError } from "../../api/client";
 import { listTodos, updateTodoCompletion } from "../../api/todos";
 import { useAuth } from "../../context/AuthContext";
 import type { Course } from "../../types/course";
 import type { TodoItem } from "../../types/todo";
+import { revealAndFocus } from "../shared/revealAndFocus";
 import TodoForm from "./TodoForm";
 import TodoList from "./TodoList";
 import { sortTodos } from "./sortTodos";
@@ -26,14 +27,17 @@ function loadErrorMessage(error: unknown): string {
 export default function TodoPanel({
   refreshKey,
   onTodos,
+  onCreateCourse,
 }: {
   refreshKey: number;
   onTodos?: (todos: TodoItem[]) => void;
+  onCreateCourse?: () => void;
 }) {
   const { accessToken } = useAuth();
   const [state, setState] = useState<PanelState>({ status: "loading" });
   const [updatingId, setUpdatingId] = useState<number | null>(null);
   const [toggleError, setToggleError] = useState("");
+  const panelRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -83,7 +87,7 @@ export default function TodoPanel({
   }
 
   return (
-    <section id="tasks" className="todo-panel" aria-labelledby="tasks-heading">
+    <section ref={panelRef} id="tasks" className="todo-panel" aria-labelledby="tasks-heading">
       <div className="todo-list">
         <h2 id="tasks-heading">My To-Do List</h2>
         {state.status === "loading" && <p role="status">Loading tasks...</p>}
@@ -94,6 +98,9 @@ export default function TodoPanel({
             courses={state.courses}
             updatingId={updatingId}
             onToggle={toggleTodo}
+            onCreateCourse={onCreateCourse}
+            // The task form's first field is its title.
+            onAddFirst={() => revealAndFocus(panelRef.current?.querySelector<HTMLInputElement>(".todo-form input"))}
           />
         )}
         {toggleError && <p className="form-error" role="alert">{toggleError}</p>}

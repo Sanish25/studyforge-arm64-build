@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { generateQuiz, getQuiz, getQuizResults, QuizRequestError, submitQuiz } from "../../api/quizzes";
 import { useAuth } from "../../context/AuthContext";
-import type { TrackedDocument } from "../../types/document";
+import type { MaterialsLoadState, TrackedDocument } from "../../types/document";
 import type { Quiz, QuizAnswer, QuizLength, QuizResult } from "../../types/quiz";
 import type { QuizMode } from "../../types/survival";
 import QuizPlayer from "./QuizPlayer";
@@ -12,7 +12,7 @@ import SurvivalSummary from "./SurvivalSummary";
 import { generateErrorMessage } from "./quizErrors";
 import { hasSavedGame, survivalStorageKey, useSurvivalGame } from "./useSurvivalGame";
 
-type Props = { courseId: number; materials: TrackedDocument[] };
+type Props = { courseId: number; materials: TrackedDocument[]; materialsState?: MaterialsLoadState };
 
 // The open quiz's id survives a reload; the quiz itself and any grade are refetched.
 function quizKey(userId: number, courseId: number) { return `studyforge:quiz:${userId}:${courseId}`; }
@@ -46,7 +46,7 @@ export default function QuizPanel(props: Props) {
 type QuizzesProps = Props & { accessToken: string; storageKey: string; survivalKey: string };
 
 // Chooses the screen and runs the regular quiz. Survival's logic lives in useSurvivalGame.
-function Quizzes({ courseId, materials, accessToken, storageKey, survivalKey }: QuizzesProps) {
+function Quizzes({ courseId, materials, materialsState = "ready", accessToken, storageKey, survivalKey }: QuizzesProps) {
   const game = useSurvivalGame({ courseId, accessToken, storageKey: survivalKey, onStart: () => saveQuizId(storageKey, null) });
   // Selection, length and mode live here, not in QuizSetup, so "Take another quiz" keeps them.
   const [mode, setMode] = useState<QuizMode>(() => hasSavedGame(survivalKey) ? "survival" : "regular");
@@ -148,7 +148,7 @@ function Quizzes({ courseId, materials, accessToken, storageKey, survivalKey }: 
   }
   if (result) return <QuizResults result={result} onRestart={restart} />;
   if (quiz) return <QuizPlayer key={quiz.id} quiz={quiz} submitting={busy} error={error} onSubmit={submit} />;
-  return <QuizSetup mode={mode} onModeChange={setMode} materials={materials} selected={selected} onSelectedChange={setSelected}
+  return <QuizSetup courseId={courseId} materialsState={materialsState} mode={mode} onModeChange={setMode} materials={materials} selected={selected} onSelectedChange={setSelected}
     length={length} onLengthChange={setLength} busy={busy || game.busy} error={mode === "survival" ? game.error : error}
     onGenerate={mode === "survival" ? (documentIds) => game.start(documentIds, length) : generate} />;
 }

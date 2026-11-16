@@ -1,9 +1,12 @@
-import type { TrackedDocument } from "../../types/document";
+import type { MaterialsLoadState, TrackedDocument } from "../../types/document";
 import { DETAIL_LEVELS, NOTE_FORMATS, NOTE_TYPES, type NotesOptions } from "../../types/notes";
 import { materialReferences, reconcileSelection, selectedDocumentIds } from "../chat/chatReferences";
 import MaterialPicker from "../documents/MaterialPicker";
+import GoToMaterialsLink from "../courses/GoToMaterialsLink";
 
 type Props = {
+  courseId: number;
+  materialsState: MaterialsLoadState;
   materials: TrackedDocument[];
   selected: string[];
   onSelectedChange: (selected: string[]) => void;
@@ -37,7 +40,7 @@ function ChoiceGroup<K extends keyof NotesOptions>({ name, legend, choices, opti
   </fieldset>;
 }
 
-export default function NotesSetup({ materials, selected, onSelectedChange, options, onOptionsChange, busy, error, onGenerate }: Props) {
+export default function NotesSetup({ courseId, materials, materialsState, selected, onSelectedChange, options, onOptionsChange, busy, error, onGenerate }: Props) {
   const references = materialReferences(materials);
   // Re-derived on every render, so a material that was deleted or stopped
   // being READY drops out of the selection without any extra effect.
@@ -52,8 +55,9 @@ export default function NotesSetup({ materials, selected, onSelectedChange, opti
     <h3>Study notes</h3>
     <p>Choose one or more materials to combine into one set of notes, then choose how they are written.</p>
 
-    <MaterialPicker materials={materials} selected={effective} onSelectedChange={onSelectedChange} disabled={busy}
-      emptyMessage="Upload a material in the Materials tab to create notes."
+    <MaterialPicker materials={materials} state={materialsState} selected={effective} onSelectedChange={onSelectedChange} disabled={busy}
+      emptyMessage="No materials yet. Upload one in Materials to create notes."
+      emptyAction={<GoToMaterialsLink courseId={courseId} />}
       notReadyMessage="None of your materials are ready yet. Notes can be generated once processing finishes." />
 
     <ChoiceGroup name="note_type" legend="Note type" choices={NOTE_TYPES} {...groups} />

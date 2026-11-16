@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { generateNotes, getNotes, NotesRequestError } from "../../api/notes";
 import { useAuth } from "../../context/AuthContext";
-import type { TrackedDocument } from "../../types/document";
+import type { MaterialsLoadState, TrackedDocument } from "../../types/document";
 import { DEFAULT_NOTES_OPTIONS, type CourseNotes, type NotesOptions } from "../../types/notes";
 import NotesSetup from "./NotesSetup";
 import NotesView from "./NotesView";
 
-type Props = { courseId: number; materials: TrackedDocument[] };
+type Props = { courseId: number; materials: TrackedDocument[]; materialsState?: MaterialsLoadState };
 
 // The open notes' id survives a reload, so a refresh never pays for a new generation.
 function notesKey(userId: number, courseId: number) { return `studyforge:notes:${userId}:${courseId}`; }
@@ -53,7 +53,7 @@ export default function NotesPanel(props: Props) {
   return <Notes key={`${user.id}:${props.courseId}`} {...props} accessToken={accessToken} storageKey={notesKey(user.id, props.courseId)} />;
 }
 
-function Notes({ courseId, materials, accessToken, storageKey }: Props & { accessToken: string; storageKey: string }) {
+function Notes({ courseId, materials, materialsState = "ready", accessToken, storageKey }: Props & { accessToken: string; storageKey: string }) {
   // Selection and options live here, not in NotesSetup, so "Create new notes" keeps them.
   const [selected, setSelected] = useState<string[]>([]);
   const [options, setOptions] = useState<NotesOptions>(DEFAULT_NOTES_OPTIONS);
@@ -124,6 +124,6 @@ function Notes({ courseId, materials, accessToken, storageKey }: Props & { acces
 
   if (restoring) return <p role="status">Loading your notes…</p>;
   if (notes) return <NotesView key={notes.id} notes={notes} onCreateNew={createNew} />;
-  return <NotesSetup materials={materials} selected={selected} onSelectedChange={setSelected}
+  return <NotesSetup courseId={courseId} materials={materials} materialsState={materialsState} selected={selected} onSelectedChange={setSelected}
     options={options} onOptionsChange={setOptions} busy={busy} error={error} onGenerate={generate} />;
 }

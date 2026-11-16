@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { afterEach, expect, it, vi } from "vitest";
+import { MemoryRouter, type NavigateFunction, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
 import CourseDetailPage from "./CourseDetailPage";
 
@@ -104,7 +104,7 @@ it("keeps an in-flight course chat question mounted through an access-token refr
   });
   vi.stubGlobal("fetch", fetch);
   const route = () => <MemoryRouter initialEntries={[`/courses/${course.id}`]}>
-    <Routes><Route path="/courses/:courseId" element={<CourseDetailPage />} /></Routes>
+    <Routes><Route path="/courses/:courseId/:section?" element={<CourseDetailPage />} /></Routes>
   </MemoryRouter>;
   const { rerender } = render(route());
   await screen.findByRole("checkbox", { name: /Lecture.pdf/ });
@@ -124,4 +124,120 @@ it("keeps an in-flight course chat question mounted through an access-token refr
 
   await act(async () => finishQuestion(Response.json({ status: "INSUFFICIENT_CONTEXT", answer: null, citations: [] })));
   expect(screen.getByText(/find enough information in the selected references/)).toBeInTheDocument();
+});
+
+const address = { navigate: (() => {}) as NavigateFunction, url: "" };
+function AddressProbe() {
+  const location = useLocation();
+  address.navigate = useNavigate();
+  address.url = location.pathname + location.search;
+  return null;
+}
+
+it.each([
+  ["/courses/99", "/courses/99/materials"],
+  ["/courses/99?pandu=open", "/courses/99/materials?pandu=open"],
+  ["/courses/99/bogus?pandu=closed", "/courses/99/materials?pandu=closed"],
+])("redirects %s to %s without adding a history entry", async (from, to) => {
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ detail: "Not found." }, { status: 404 })));
+  render(<MemoryRouter initialEntries={["/", from]} initialIndex={1}>
+    <Routes>
+      <Route path="/" element={<p>Home page</p>} />
+      <Route path="/courses/:courseId/:section?" element={<CourseDetailPage />} />
+    </Routes>
+    <AddressProbe />
+  </MemoryRouter>);
+
+  await screen.findByRole("alert");
+  expect(address.url).toBe(to);
+  await act(async () => address.navigate(-1));
+  expect(screen.getByText("Home page")).toBeInTheDocument();
+});
+
+it.each([
+  [403, "Could not load this course. Please reload the page to try again."],
+  [500, "Could not load this course. Please reload the page to try again."],
+  [401, "Your session has expired. Please reload the page to sign in again."],
+])("shows the right message and no workspace when the course request returns %i", async (status, message) => {
+  const fetch = vi.fn(async () => Response.json({ detail: "Nope." }, { status }));
+  vi.stubGlobal("fetch", fetch);
+  render(<MemoryRouter initialEntries={["/courses/42/notes"]}>
+    <Routes><Route path="/courses/:courseId/:section?" element={<CourseDetailPage />} /></Routes>
+  </MemoryRouter>);
+
+  expect(await screen.findByRole("alert")).toHaveTextContent(message);
+  expect(screen.getByRole("link", { name: "← My courses" })).toHaveAttribute("href", "/courses");
+  expect(screen.queryByRole("tablist", { name: "Course sections" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("complementary", { name: "Pandu course chat" })).not.toBeInTheDocument();
+  // Only the course itself was requested; nothing from the workspace started loading.
+  expect(fetch).toHaveBeenCalledTimes(1);
+});
+
+it("keeps the same workspace mounted when the section changes in the address", async () => {
+  sessionStorage.clear();
+  const fetch = vi.fn(async (input: RequestInfo | URL) => {
+    const path = new URL(String(input)).pathname;
+    if (path === `/api/v1/courses/${course.id}/`) return Response.json(course);
+    if (path === "/api/v1/conversations/") return Response.json([
+      { id: 9, course_id: course.id, title: "", created_at: "2026-10-02", updated_at: "2026-10-02" },
+    ]);
+    return Response.json([]);
+  });
+  vi.stubGlobal("fetch", fetch);
+  render(<MemoryRouter initialEntries={[`/courses/${course.id}/materials`]}>
+    <Routes><Route path="/courses/:courseId/:section?" element={<CourseDetailPage />} /></Routes>
+    <AddressProbe />
+  </MemoryRouter>);
+  const chat = await screen.findByRole("complementary", { name: "Pandu course chat" });
+  const courseLoads = () => fetch.mock.calls.filter(([url]) => new URL(String(url)).pathname === `/api/v1/courses/${course.id}/`).length;
+  expect(courseLoads()).toBe(1);
+
+  fireEvent.click(screen.getByRole("tab", { name: "Notes" }));
+  expect(address.url).toBe(`/courses/${course.id}/notes`);
+  fireEvent.click(screen.getByRole("button", { name: "AI Assistant" }));
+  await act(async () => address.navigate(-1));
+  await act(async () => address.navigate(-1));
+  expect(address.url).toBe(`/courses/${course.id}/materials`);
+
+  // Same chat element and no second course request: the page did not remount the workspace.
+  expect(screen.getByRole("complementary", { name: "Pandu course chat" })).toBe(chat);
+  expect(courseLoads()).toBe(1);
+});
+
+describe("last opened course", () => {
+  const savedCourse = () => localStorage.getItem(`studyforge:lastCourse:${authState.user.id}`);
+  const openCourse = (url: string, respond: (path: string) => Response) => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => respond(new URL(String(input)).pathname)));
+    render(<MemoryRouter initialEntries={[url]}>
+      <Routes><Route path="/courses/:courseId/:section?" element={<CourseDetailPage />} /></Routes>
+    </MemoryRouter>);
+  };
+  beforeEach(() => { localStorage.clear(); sessionStorage.clear(); });
+
+  it("records a course once it has loaded, whichever section was opened", async () => {
+    openCourse(`/courses/${course.id}/quizzes`, (path) => path === `/api/v1/courses/${course.id}/` ? Response.json(course) : Response.json([]));
+    await screen.findByRole("tablist", { name: "Course sections" });
+    expect(savedCourse()).toBe(String(course.id));
+  });
+
+  it("forgets the saved course when it is not found or no longer the student's", async () => {
+    localStorage.setItem(`studyforge:lastCourse:${authState.user.id}`, "99");
+    openCourse("/courses/99/notes", () => Response.json({ detail: "Not found." }, { status: 404 }));
+    await screen.findByRole("alert");
+    expect(savedCourse()).toBeNull();
+  });
+
+  it("keeps a different saved course when another course is not found", async () => {
+    localStorage.setItem(`studyforge:lastCourse:${authState.user.id}`, String(course.id));
+    openCourse("/courses/99/notes", () => Response.json({ detail: "Not found." }, { status: 404 }));
+    await screen.findByRole("alert");
+    expect(savedCourse()).toBe(String(course.id));
+  });
+
+  it("keeps the saved course after a temporary server error", async () => {
+    localStorage.setItem(`studyforge:lastCourse:${authState.user.id}`, String(course.id));
+    openCourse(`/courses/${course.id}/notes`, () => Response.json({ detail: "Oops." }, { status: 500 }));
+    await screen.findByRole("alert");
+    expect(savedCourse()).toBe(String(course.id));
+  });
 });
