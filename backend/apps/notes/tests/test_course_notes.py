@@ -13,7 +13,7 @@ from apps.courses.models import Course
 from apps.documents.models import Document
 from apps.documents.services import delete_material
 from apps.knowledge.models import Chunk
-from apps.notes.llm import InvalidLLMOutput, LLMError, validate_course_notes
+from apps.notes.llm import DEFAULT_NOTE_OPTIONS, InvalidLLMOutput, LLMError, validate_course_notes
 from apps.notes.llm.provider import (
     NOTES_MERGE_INSTRUCTION,
     NOTES_SINGLE_INSTRUCTION,
@@ -216,11 +216,15 @@ class GenerateCourseNotesTests(TestCase):
 
         notes = generate_course_notes(self.user, self.course, [self.second, self.first], client=client)
 
-        client.generate_notes.assert_called_once_with([("Cells", "Cell text."), ("Genes", "Gene text.")])
+        client.generate_notes.assert_called_once_with(
+            [("Cells", "Cell text."), ("Genes", "Gene text.")], DEFAULT_NOTE_OPTIONS
+        )
         self.assertEqual(notes.title, "Notes: Cells, Genes")
         self.assertEqual(notes.sections, VALID_NOTES["sections"])
         self.assertEqual(notes.model_name, "mock")
-        self.assertCountEqual(notes.source_documents.all(), [self.first, self.second])
+        self.assertEqual(
+            list(notes.sources.values_list("document_id", flat=True)), [self.first.pk, self.second.pk]
+        )
 
     def test_model_failure_saves_nothing(self):
         client = mock.Mock()
@@ -233,7 +237,7 @@ class GenerateCourseNotesTests(TestCase):
         client = mock.Mock()
         client.name = "mock"
 
-        def delete_mid_call(sources):
+        def delete_mid_call(sources, options):
             self.second.delete()
             return VALID_NOTES
 
@@ -344,7 +348,7 @@ class CourseNotesEndpointTests(APITestCase):
                 response = self.post([self.first.pk])
 
         self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.json()["code"], "NOTES_GENERATION_FAILED")
+        self.assertEqual(response.json()["code"], "NOTES_PROVIDER_UNAVAILABLE")
         self.assertFalse(CourseNotes.objects.exists())
 
     def test_saved_notes_can_be_read_back_only_by_their_owner(self):

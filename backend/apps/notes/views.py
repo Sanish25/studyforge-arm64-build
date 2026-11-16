@@ -7,7 +7,7 @@ from rest_framework.views import APIView
 from apps.documents.models import Document
 from apps.documents.selectors import get_owned_course_documents
 
-from apps.notes.llm import LLMError
+from apps.notes.llm import InvalidLLMOutput, LLMError, NotesMergeTooLargeError
 from apps.notes.selectors import get_owned_course, get_owned_document, get_owned_notes
 from apps.notes.serializers import (
     CourseNotesSerializer,
@@ -97,7 +97,7 @@ class CourseNotesView(APIView):
             )
 
         try:
-            notes = generate_course_notes(request.user, course, documents)
+            notes = generate_course_notes(request.user, course, documents, serializer.get_options())
         except EmptyMaterialsError as exc:
             return Response(
                 {
@@ -115,14 +115,37 @@ class CourseNotesView(APIView):
                 },
                 status=status.HTTP_422_UNPROCESSABLE_ENTITY,
             )
+        except NotesMergeTooLargeError:
+            # Detailed notes from many batches can outgrow one merge call.
+            logger.warning("Partial notes too large to merge for course %s", course.pk)
+            return Response(
+                {
+                    "code": "NOTES_INPUT_TOO_LARGE",
+                    "detail": "The selected materials are too long to combine at this detail level. "
+                    "Select fewer or choose a lower detail level.",
+                },
+                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+        # Below are AI failures, never document failures: the selected materials
+        # stay READY and nothing was saved, so the student can simply retry.
+        # Both subclass LLMError, so they must be caught before it.
+        except InvalidLLMOutput:
+            logger.exception("Notes generation returned unusable output for course %s", course.pk)
+            return Response(
+                {
+                    "code": "NOTES_INVALID_OUTPUT",
+                    "detail": "The AI returned notes that could not be used. Please try again, "
+                    "or choose a lower detail level or fewer materials.",
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         except LLMError:
-            # Upstream outage, rate limit, or output that failed validation.
-            # Nothing was saved, so the student can simply retry.
+            # Outage, rate limit, timeout or missing key.
             logger.exception("Notes generation failed for course %s", course.pk)
             return Response(
                 {
-                    "code": "NOTES_GENERATION_FAILED",
-                    "detail": "The notes could not be generated right now. Please try again.",
+                    "code": "NOTES_PROVIDER_UNAVAILABLE",
+                    "detail": "The AI service is unavailable right now. Please try again in a few minutes.",
                 },
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )

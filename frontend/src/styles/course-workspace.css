@@ -91,7 +91,14 @@
 .quiz-option-correct { color: #1b5e20; font-weight: 600; }
 .quiz-option-wrong { color: #b3261e; }
 .quiz-explanation { color: #4a5368; }
+.notes-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: .5rem; }
+.notes-options label { display: flex; align-items: flex-start; gap: .6rem; padding: .6rem .8rem; border: 1px solid #e3e6ed; border-radius: .8rem; cursor: pointer; }
+.notes-options label:has(input:checked) { border-color: #5f52b5; background: #f0edff; }
+.notes-options input { margin-top: .2rem; }
+.notes-options small { display: block; color: #707a91; font-size: .85rem; }
 .notes-sources { margin: .2rem 0 1rem; color: #707a91; font-size: .9rem; overflow-wrap: anywhere; }
+.notes-options-used { margin: -.6rem 0 1rem; color: #5f52b5; font-size: .85rem; font-weight: 600; }
+.notes-paragraphs p { margin: 0 0 .7rem; line-height: 1.55; }
 .notes-overview { margin: 0 0 1rem; }
 .notes-section { margin-bottom: 1rem; padding: .8rem 1rem; border: 1px solid #e3e6ed; border-radius: 1rem; }
 .notes-section h4 { margin: 0 0 .5rem; font-size: 1.05rem; }

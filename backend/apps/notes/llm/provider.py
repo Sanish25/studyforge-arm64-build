@@ -1,16 +1,22 @@
 """OpenAI-backed study guide generation."""
 
 import json
+import logging
 import os
 
 from openai import APIError, OpenAI, RateLimitError
 
 from apps.notes.llm.base import (
+    DEFAULT_NOTE_OPTIONS,
     InvalidLLMOutput,
     LLMError,
+    NotesMergeTooLargeError,
     validate_course_notes,
     validate_study_guide,
 )
+from apps.notes.llm.prompts import build_notes_prompt
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "gpt-4o-mini"
 
@@ -30,6 +36,15 @@ NOTES_BATCH_MIN_OUTPUT_RATIO = 0.02
 NOTES_MERGE_MIN_OUTPUT_RATIO = 0.25
 # Short input can legitimately produce short notes, so it is not checked.
 NOTES_MIN_CHECKED_INPUT = 20_000
+
+# (batch, merge) minimum output ratios per detail level. Brief notes are meant
+# to be short, so the standard floor would reject correct brief notes as
+# skimmed. Brief and detailed are estimates until measured against the model.
+NOTES_MIN_OUTPUT_RATIOS = {
+    "brief": (0.005, 0.10),
+    "standard": (NOTES_BATCH_MIN_OUTPUT_RATIO, NOTES_MERGE_MIN_OUTPUT_RATIO),
+    "detailed": (0.03, 0.30),
+}
 
 SYSTEM_PROMPT = """You build study guides from a student's own course materials.
 The material may come from any subject and any format — lecture slides, prose
@@ -69,53 +84,7 @@ Respond with a JSON object in exactly this shape:
 }"""
 
 
-NOTES_SYSTEM_PROMPT = """You write organized study notes from a student's own course
-materials. Each material appears under a "## " heading carrying its title. The
-materials may come from any subject and any format.
-
-Grounding rules:
-- Use ONLY the material text provided. Never add outside knowledge, even where
-  it is incomplete, or where you know more about the topic than it does.
-- Every item must be traceable to something the materials actually state.
-- If the materials are too thin to support many items, return fewer rather than
-  padding with generic knowledge about the topic.
-
-Organizing rules:
-- Group by topic. Where several materials cover the same topic, consolidate them
-  into one section instead of repeating it per material.
-- Keep distinct topics in the order the materials present them.
-
-Coverage rules:
-- Cover every topic the materials explain, including those near the end. Longer
-  input needs more sections and items, never a shorter summary.
-- Keep every distinct definition, rule, value, date and name.
-
-Writing rules:
-- Write for a student revising this material for an exam.
-- Preserve the materials' own terminology, notation and symbols.
-- Reproduce formulas, dates, names, figures and citations exactly as written.
-- No meta-commentary. Never write "the document", "this lecture", "the material",
-  "the materials", "these notes", "the text", "the author", "covers", "focuses",
-  or "discusses".
-
-Respond with a JSON object in exactly this shape:
-
-{
-  "overview": "A short paragraph stating the main ideas themselves, not what the
-    materials are about.",
-  "sections": [
-    {
-      "heading": "A short topic heading",
-      "key_concepts": [
-        {"term": "A term the materials explain",
-         "explanation": "One or two sentences, as the materials define it."}
-      ],
-      "points": ["A specific claim worth remembering that is not already a key
-        concept: a rule, relationship, result, condition, exception, or date."]
-    }
-  ]
-}"""
-
+# The notes system prompt is built per option set in apps.notes.llm.prompts.
 
 NOTES_SINGLE_INSTRUCTION = "Write study notes from the materials below."
 NOTES_MERGE_INSTRUCTION = (
@@ -210,16 +179,23 @@ class OpenAIStudyGuideLLM:
             return self._generate_once(text)
         return self._generate_staged(text)
 
-    def generate_notes(self, sources):
-        """Build notes from (title, text) materials, in the order given."""
+    def generate_notes(self, sources, options=DEFAULT_NOTE_OPTIONS):
+        """Build notes from (title, text) materials, in the order given.
+
+        Every batch and the merge use the same options, so merged notes keep
+        the type, detail level and format the student chose.
+        """
+        batch_ratio, merge_ratio = NOTES_MIN_OUTPUT_RATIOS[options.detail_level]
         batches = _batch_materials(sources, self._notes_batch_limit)
-        print(f"[llm] notes: {len(batches)} batches", flush=True)
+        print(f"[llm] notes: {len(batches)} batches, {options}", flush=True)
 
         if len(batches) == 1:
-            return self._generate_notes_once(batches[0], NOTES_SINGLE_INSTRUCTION)
+            return self._generate_notes_once(
+                batches[0], NOTES_SINGLE_INSTRUCTION, batch_ratio, options=options
+            )
 
         partials = [
-            self._generate_notes_once(batch, NOTES_SINGLE_INSTRUCTION)
+            self._generate_notes_once(batch, NOTES_SINGLE_INSTRUCTION, batch_ratio, options=options)
             for batch in batches
         ]
 
@@ -227,26 +203,39 @@ class OpenAIStudyGuideLLM:
         # batch does. The batch limit guards coverage, not the model's capacity.
         combined = json.dumps(partials, ensure_ascii=False)
         if len(combined) > self._single_pass_limit:
-            raise LLMError("Partial notes are too large to merge in one call")
+            raise NotesMergeTooLargeError("Partial notes are too large to merge in one call")
         return self._generate_notes_once(
-            combined, NOTES_MERGE_INSTRUCTION, NOTES_MERGE_MIN_OUTPUT_RATIO
+            combined, NOTES_MERGE_INSTRUCTION, merge_ratio, options=options
         )
 
-    def _generate_notes_once(self, text, instruction, min_output_ratio=NOTES_BATCH_MIN_OUTPUT_RATIO):
+    def _generate_notes_once(
+        self,
+        text,
+        instruction,
+        min_output_ratio=NOTES_BATCH_MIN_OUTPUT_RATIO,
+        options=DEFAULT_NOTE_OPTIONS,
+    ):
         """One model call, repeated once if the output is unusable.
 
         Model output varies from call to call, so a retry usually succeeds, and
         one bad item should not throw away every batch before it. Provider
         failures are not repeated here; the client already retried those.
         """
-        try:
-            return self._read_notes(text, instruction, min_output_ratio)
-        except InvalidLLMOutput as exc:
-            print(f"[llm] retrying notes call: {str(exc)[:120]}", flush=True)
-            return self._read_notes(text, instruction, min_output_ratio)
+        phase = "merge" if instruction == NOTES_MERGE_INSTRUCTION else "batch"
+        for attempt in (1, 2):
+            try:
+                return self._read_notes(text, instruction, min_output_ratio, options)
+            except InvalidLLMOutput as exc:
+                # Validation reasons are safe to log; raw model text is not.
+                logger.warning(
+                    "Notes output rejected: phase=%s attempt=%s options=%s/%s/%s reason=%s",
+                    phase, attempt, options.note_type, options.detail_level, options.format, exc,
+                )
+                if attempt == 2:
+                    raise
 
-    def _read_notes(self, text, instruction, min_output_ratio):
-        raw = self._complete(NOTES_SYSTEM_PROMPT, instruction, text, "materials")
+    def _read_notes(self, text, instruction, min_output_ratio, options=DEFAULT_NOTE_OPTIONS):
+        raw = self._complete(build_notes_prompt(options), instruction, text, "materials")
 
         # Valid notes that dropped most topics pass every shape check, so a
         # failed request is the only signal the student would ever get.
@@ -258,9 +247,9 @@ class OpenAIStudyGuideLLM:
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise InvalidLLMOutput(f"Model did not return JSON: {raw[:200]}") from exc
+            raise InvalidLLMOutput("Model did not return JSON") from exc
 
-        return validate_course_notes(payload)
+        return validate_course_notes(payload, options)
 
     def _generate_staged(self, text):
         """Summarise section by section, then summarise the summaries.

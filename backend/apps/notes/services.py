@@ -4,8 +4,8 @@ from django.db import transaction
 from django.http import Http404
 
 from apps.documents.models import Document
-from apps.notes.llm import get_client
-from apps.notes.models import CourseNotes, StudyGuide
+from apps.notes.llm import DEFAULT_NOTE_OPTIONS, get_client
+from apps.notes.models import CourseNotes, NoteSource, StudyGuide
 from apps.notes.selectors import build_note_sources, get_ordered_chunks
 
 # Characters, roughly 4 per token. Generation runs inside one HTTP request, so
@@ -66,9 +66,14 @@ def _build_title(documents):
     return title if len(title) <= max_length else title[: max_length - 1] + "…"
 
 
-def generate_course_notes(owner, course, documents, client=None):
+def generate_course_notes(owner, course, documents, options=DEFAULT_NOTE_OPTIONS, client=None):
     """Generate and save notes from documents the caller has already checked
-    are owned, in `course`, and READY.
+    are owned, in `course`, and READY, written as `options` asks.
+
+    Nothing is saved unless the model returns valid notes: a provider failure
+    or invalid output raises LLMError before the transaction opens, and the
+    notes and their sources are written together or not at all. Documents are
+    only read here, so a failed generation never changes their status.
 
     `client` can be injected so tests control the model output.
     """
@@ -87,7 +92,7 @@ def generate_course_notes(owner, course, documents, client=None):
     # The model call happens before the transaction opens: it can take many
     # seconds and must not hold a database connection in a transaction.
     client = client or get_client()
-    result = client.generate_notes(sources)
+    result = client.generate_notes(sources, options)
 
     document_ids = [document.pk for document in documents]
     with transaction.atomic():
@@ -105,7 +110,13 @@ def generate_course_notes(owner, course, documents, client=None):
             title=_build_title(documents),
             overview=result["overview"],
             sections=result["sections"],
+            note_type=options.note_type,
+            detail_level=options.detail_level,
+            format=options.format,
             model_name=client.name,
         )
-        notes.source_documents.set(documents)
+        NoteSource.objects.bulk_create(
+            NoteSource(notes=notes, document_id=document_id, position=position)
+            for position, document_id in enumerate(document_ids)
+        )
     return notes

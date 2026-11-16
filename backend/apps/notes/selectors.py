@@ -2,6 +2,7 @@ from django.shortcuts import get_object_or_404
 
 from apps.courses.models import Course
 from apps.documents.models import Document
+from apps.identity.ownership import owned_documents
 from apps.notes.models import CourseNotes
 
 
@@ -11,10 +12,31 @@ def get_owned_course(user, course_id):
 
 def get_owned_notes(user, notes_id):
     return get_object_or_404(
-        CourseNotes.objects.prefetch_related("source_documents"),
+        CourseNotes.objects.prefetch_related("sources"),
         pk=notes_id,
         owner=user,
     )
+
+
+def get_source_documents(notes):
+    """[{"id", "name"}] for the materials the notes were built from, in order.
+
+    Sources are plain ids, so the names are looked up here, scoped to the
+    notes' owner: an id can never surface another student's title. An id with
+    no matching material is left out rather than failing the read; deleting a
+    material normally deletes its notes (apps.notes.signals).
+    """
+    document_ids = [source.document_id for source in notes.sources.all()]
+    names = dict(
+        owned_documents(notes.owner_id)
+        .filter(pk__in=document_ids)
+        .values_list("pk", "title")
+    )
+    return [
+        {"id": document_id, "name": names[document_id]}
+        for document_id in document_ids
+        if document_id in names
+    ]
 
 
 def build_note_sources(documents):

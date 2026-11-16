@@ -7,7 +7,7 @@ from rest_framework_simplejwt.tokens import AccessToken
 
 from apps.documents.models import Document, Job
 from apps.knowledge.models import Chunk
-from apps.notes.models import CourseNotes, StudyGuide
+from apps.notes.models import CourseNotes, NoteSource, StudyGuide
 from apps.quizzes.models import Quiz
 
 pytestmark = pytest.mark.django_db(transaction=True)
@@ -58,7 +58,7 @@ def test_delete_removes_source_jobs_chunks_embeddings_guides_and_notes(
         overview="Overview",
         sections=[],
     )
-    notes.source_documents.add(document)
+    NoteSource.objects.create(notes=notes, document_id=document.pk, position=0)
     storage, source_name = document.file.storage, document.file.name
 
     response = owner_client.delete(document_detail(document))

@@ -4,16 +4,22 @@ names a provider directly."""
 import os
 
 from apps.notes.llm.base import (
+    DEFAULT_NOTE_OPTIONS,
     InvalidLLMOutput,
     LLMError,
+    NoteOptions,
+    NotesMergeTooLargeError,
     validate_course_notes,
     validate_study_guide,
 )
 
 __all__ = [
     "get_client",
+    "DEFAULT_NOTE_OPTIONS",
     "LLMError",
     "InvalidLLMOutput",
+    "NoteOptions",
+    "NotesMergeTooLargeError",
     "validate_course_notes",
     "validate_study_guide",
 ]

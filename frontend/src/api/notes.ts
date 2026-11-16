@@ -1,5 +1,5 @@
 import { request } from "./client";
-import type { CourseNotes } from "../types/notes";
+import type { CourseNotes, NotesOptions } from "../types/notes";
 
 /**
  * Carries the backend's `code` next to the HTTP status, the same split
@@ -37,6 +37,7 @@ async function readNotes(response: Response): Promise<CourseNotes> {
 export async function generateNotes(
   courseId: number,
   documentIds: number[],
+  options: NotesOptions,
   accessToken: string,
   signal?: AbortSignal,
 ): Promise<CourseNotes> {
@@ -46,7 +47,8 @@ export async function generateNotes(
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ document_ids: documentIds }),
+        // Only the fixed option values are sent; the student never types prompt text.
+        body: JSON.stringify({ document_ids: documentIds, ...options }),
         signal,
       },
       accessToken,
