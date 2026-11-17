@@ -1,4 +1,4 @@
-name: StudyForge ARM64 Processing Build
+name: Publish StudyForge ARM64 Processing Image to OCIR
 
 on:
   workflow_dispatch:
@@ -7,9 +7,16 @@ permissions:
   contents: read
 
 jobs:
-  build:
-    name: Build ARM64 image
+  publish:
+    name: Build and publish ARM64 image
     runs-on: ubuntu-24.04-arm
+    environment: ocir-publish
+
+    env:
+      OCIR_REGISTRY: phx.ocir.io
+      OCIR_NAMESPACE: axcyydnoof5f
+      IMAGE_REPOSITORY: studyforge/document-processing
+      IMAGE_TAG: arm64-${{ github.sha }}
 
     steps:
       - name: Checkout source
@@ -20,21 +27,49 @@ jobs:
           uname -m
           test "$(uname -m)" = "aarch64"
 
+      - name: Verify OCIR credentials are configured
+        env:
+          OCIR_USERNAME: ${{ secrets.OCIR_USERNAME }}
+          OCIR_AUTH_TOKEN: ${{ secrets.OCIR_AUTH_TOKEN }}
+        run: |
+          test -n "$OCIR_USERNAME"
+          test -n "$OCIR_AUTH_TOKEN"
+
+      - name: Log in to OCIR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.OCIR_REGISTRY }}
+          username: ${{ secrets.OCIR_USERNAME }}
+          password: ${{ secrets.OCIR_AUTH_TOKEN }}
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build processing image
+      - name: Build and publish processing image
         uses: docker/build-push-action@v6
         with:
           context: ./services/document-processing
           platforms: linux/arm64
-          push: false
-          load: true
-          tags: studyforge-processing:arm64-test
+          push: true
+          provenance: false
+          tags: |
+            ${{ env.OCIR_REGISTRY }}/${{ env.OCIR_NAMESPACE }}/${{ env.IMAGE_REPOSITORY }}:${{ env.IMAGE_TAG }}
+            ${{ env.OCIR_REGISTRY }}/${{ env.OCIR_NAMESPACE }}/${{ env.IMAGE_REPOSITORY }}:arm64-latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
 
       - name: Verify image architecture
+        env:
+          IMAGE: ${{ env.OCIR_REGISTRY }}/${{ env.OCIR_NAMESPACE }}/${{ env.IMAGE_REPOSITORY }}:${{ env.IMAGE_TAG }}
         run: |
-          docker image inspect studyforge-processing:arm64-test \
-            --format '{{.Os}}/{{.Architecture}}'
-          test "$(docker image inspect studyforge-processing:arm64-test \
-            --format '{{.Architecture}}')" = "arm64"
+          docker pull --platform linux/arm64 "$IMAGE"
+          architecture="$(docker image inspect "$IMAGE" --format '{{.Os}}/{{.Architecture}}')"
+          printf 'Published image platform: %s\n' "$architecture"
+          test "$architecture" = "linux/arm64"
+
+      - name: Record image reference
+        env:
+          IMAGE: ${{ env.OCIR_REGISTRY }}/${{ env.OCIR_NAMESPACE }}/${{ env.IMAGE_REPOSITORY }}:${{ env.IMAGE_TAG }}
+        run: |
+          echo "Published image: $IMAGE" >> "$GITHUB_STEP_SUMMARY"

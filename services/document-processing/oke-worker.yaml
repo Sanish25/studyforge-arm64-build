@@ -1,0 +1,169 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: processing-worker
+  namespace: studyforge
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: studyforge-processing-worker
+  namespace: studyforge
+data:
+  PROCESSING_DB_NAME: studyforge_processing
+  PROCESSING_DB_USER: studyforge_processing
+  PROCESSING_DB_HOST: 10.0.0.234
+  PROCESSING_DB_PORT: "5432"
+  PROCESSING_DJANGO_API_URL: https://studyforge-rodians.duckdns.org
+  PROCESSING_ALLOWED_HOSTS: localhost,127.0.0.1,document-processing
+  PROCESSING_REDIS_VISIBILITY_TIMEOUT: "3600"
+  EMBEDDING_MODEL: gemini-embedding-2
+  EMBEDDING_DIMENSION: "768"
+  EMBEDDING_BATCH_SIZE: "16"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: processing-worker
+  namespace: studyforge
+  labels:
+    app.kubernetes.io/name: processing-worker
+    app.kubernetes.io/part-of: studyforge
+    app.kubernetes.io/component: document-processing
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: processing-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: processing-worker
+        app.kubernetes.io/part-of: studyforge
+        app.kubernetes.io/component: document-processing
+    spec:
+      serviceAccountName: processing-worker
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 150
+      imagePullSecrets:
+        - name: ocir-auth
+      hostAliases:
+        - ip: 10.0.0.234
+          hostnames:
+            - studyforge-rodians.duckdns.org
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: processing-worker
+          image: phx.ocir.io/axcyydnoof5f/studyforge/document-processing:arm64-46d02f8a5edc998768c9f19e716a3d6019a869c1
+          imagePullPolicy: IfNotPresent
+          command: [celery]
+          args:
+            - -A
+            - processing_service.celery:app
+            - worker
+            - --loglevel=INFO
+            - --concurrency=1
+            - --prefetch-multiplier=1
+            - --queues=document-processing
+            - --hostname=processing-worker@%h
+          envFrom:
+            - configMapRef:
+                name: studyforge-processing-worker
+          env:
+            - name: PROCESSING_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: studyforge-processing-secrets
+                  key: PROCESSING_REDIS_URL
+            - name: PROCESSING_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: studyforge-processing-secrets
+                  key: PROCESSING_SECRET_KEY
+            - name: PROCESSING_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: studyforge-processing-secrets
+                  key: PROCESSING_DB_PASSWORD
+            - name: PROCESSING_SERVICE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: studyforge-processing-secrets
+                  key: PROCESSING_SERVICE_TOKEN
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: studyforge-processing-secrets
+                  key: GEMINI_API_KEY
+            - name: HOME
+              value: /tmp
+            - name: TMPDIR
+              value: /tmp
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          startupProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - >-
+                  import django; django.setup(); from executions.models import Execution;
+                  Execution.objects.exists(); from django.conf import settings;
+                  from redis import Redis; Redis.from_url(settings.PROCESSING_REDIS_URL,
+                  socket_connect_timeout=3, socket_timeout=3).ping()
+            periodSeconds: 5
+            timeoutSeconds: 8
+            failureThreshold: 30
+          readinessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - >-
+                  import django; django.setup(); from executions.models import Execution;
+                  Execution.objects.exists(); from django.conf import settings;
+                  from redis import Redis; Redis.from_url(settings.PROCESSING_REDIS_URL,
+                  socket_connect_timeout=3, socket_timeout=3).ping()
+            periodSeconds: 20
+            timeoutSeconds: 8
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - >-
+                  import sys; cmd=open('/proc/1/cmdline','rb').read().replace(b'\0',b' ');
+                  sys.exit(0 if b'celery' in cmd and b'worker' in cmd else 1)
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
