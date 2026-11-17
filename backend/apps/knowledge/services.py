@@ -9,10 +9,10 @@ from apps.identity.ownership import owned_conversation
 from apps.knowledge.llm import LLMError, generate_answer, validate_answer
 from apps.knowledge.models import Chunk
 from apps.knowledge.citation_matching import excerpt_matches
+from apps.knowledge.query_embeddings import QueryEmbeddingError
 from apps.knowledge.retrieval import retrieve_chunks_for_documents
 from apps.knowledge.scope import question_documents
 from apps.knowledge.serializers import AnswerResultSerializer
-from apps.processing.exceptions import ProcessingError
 
 
 class RAGServiceError(Exception):
@@ -76,7 +76,7 @@ def answer_question(user, document_ids, question, *, conversation=None):
         else:
             passages = retrieve_chunks_for_documents(user, authorized_ids, question,
                                                      conversation=conversation)
-    except (ProcessingError, ImproperlyConfigured, ValueError):
+    except (QueryEmbeddingError, ImproperlyConfigured, ValueError):
         raise RAGServiceError("The question could not be answered right now.") from None
     # Recorded only once the search has really run (a failed search raises above).
     tool_trace = _search_trace(authorized_ids, passages)

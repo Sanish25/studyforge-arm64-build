@@ -28,8 +28,8 @@ DOCUMENT_STORAGE_BACKEND = "filesystem"
 STORAGES["default"] = {"BACKEND": "django.core.files.storage.FileSystemStorage"}
 os.environ["NOTES_LLM_BACKEND"] = "fake"
 os.environ["QUIZ_LLM_BACKEND"] = "fake"
+os.environ["RAG_LLM_BACKEND"] = "fake"
 for _key in ("OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS"):
     os.environ.pop(_key, None)
 GEMINI_API_KEY = ""
 CELERY_BROKER_URL = "memory://"
-CELERY_RESULT_BACKEND = "cache+memory://"

@@ -47,7 +47,6 @@ INSTALLED_APPS = [
     "rest_framework",
     "rest_framework_simplejwt.token_blacklist",
     "corsheaders",
-    "apps.processing",
     "apps.knowledge",
     "apps.users.apps.UsersConfig",
     "apps.courses",
@@ -193,7 +192,7 @@ if DOCUMENT_STORAGE_BACKEND == "s3":
         options["verify"] = os.environ["DOCUMENT_STORAGE_CA_BUNDLE"]
     STORAGES["default"] = {"BACKEND": "storages.backends.s3.S3Storage", "OPTIONS": options}
 
-# Producer configuration only. Person 4 owns the worker and task implementation.
+# Broker used to publish jobs to the standalone processing workers.
 CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://127.0.0.1:6379/0")
 if _env_bool("STUDYFORGE_REQUIRE_SECURE_CONNECTIONS"):
     if DEBUG or not os.environ.get("DJANGO_SECRET_KEY") or not os.environ.get("DJANGO_ALLOWED_HOSTS") or not os.environ.get("POSTGRES_PASSWORD"):
@@ -210,11 +209,10 @@ if _env_bool("STUDYFORGE_REQUIRE_SECURE_CONNECTIONS"):
         raise ImproperlyConfigured("Production Django requires PROCESSING_SERVICE_TOKEN.")
     if os.environ.get("DOCUMENT_STORAGE_ENDPOINT_URL", "").startswith("http://"):
         raise ImproperlyConfigured("Production document storage requires HTTPS.")
-# Gemini embeddings. The key is required only when an embedding call runs.
+# Gemini query embeddings for knowledge retrieval.
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "gemini-embedding-2")
 EMBEDDING_DIMENSION = int(os.environ.get("EMBEDDING_DIMENSION", "768"))
-EMBEDDING_BATCH_SIZE = int(os.environ.get("EMBEDDING_BATCH_SIZE", "16"))
 # Disabled until a cosine-similarity cutoff is calibrated on labeled queries.
 _retrieval_min_similarity = os.environ.get("RETRIEVAL_MIN_COSINE_SIMILARITY", "").strip()
 RETRIEVAL_MIN_COSINE_SIMILARITY = (

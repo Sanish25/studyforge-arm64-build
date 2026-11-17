@@ -271,14 +271,19 @@ Responses and error codes follow [the API contract](docs/api-contract.md).
 Uploads default to the ignored `backend/media/` directory; `MEDIA_ROOT` can
 override it. Production can select private S3-compatible storage through Django's
 `FileField`; see [production document storage](docs/deployment/production-document-storage.md).
-No public media URL is registered. The standalone worker uses authenticated
-Django retrieval locally or its own read-only object access in production.
+No public media URL is registered. The standalone worker in
+`services/document-processing` uses authenticated Django retrieval locally or
+its own read-only object access in production. It posts processing results back
+to Django, which persists document status and chunks in the application database.
 
-Set `CELERY_BROKER_URL` to the standalone processing worker's broker (local default
-`redis://127.0.0.1:6379/0`). The API publishes
+Set `CELERY_BROKER_URL` to the broker used by the standalone processing workers
+(default `redis://127.0.0.1:6379/0`). After committing the Document and its
+initial queued Job, the API publishes
 `processing_service.tasks.process_document_task` with `job_id`, `document_id`,
-and `source_sha256` after committing the Document and Job. Django marks a Job
-failed only when dispatch definitely fails.
+and `source_sha256` to the `document-processing` queue. The API does not execute
+processing or retry publication. The worker reports Job and Document transitions
+through authenticated callbacks; the API marks its Job failed only when dispatch
+definitely fails.
 
 An unavailable broker returns the contract's `503` with the saved document ID;
 the file is retained. An uncertain send leaves the document state unchanged.
