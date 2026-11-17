@@ -61,3 +61,34 @@ pipelines:
       - parallel:
           - step: *backend
           - step: *frontend
+
+  custom:
+    test-arm64-compatibility:
+      - step:
+          name: Check hosted ARM64 build support
+          image: docker:27-cli
+          services:
+            - docker
+          script:
+            - docker version
+            - docker buildx version
+            - docker run --rm --privileged tonistiigi/binfmt --install arm64
+            - docker run --rm --platform linux/arm64 arm64v8/alpine:3.20 uname -m
+
+    build-processing-arm64:
+      - step:
+          name: Build and push ARM64 processing image
+          image: docker:27-cli
+          services:
+            - docker
+          script:
+            - test -n "$OCIR_USERNAME"
+            - test -n "$OCIR_AUTH_TOKEN"
+            - docker version
+            - docker buildx version
+            - docker run --rm --privileged tonistiigi/binfmt --install arm64
+            - docker buildx create --name studyforge-arm64 --driver docker-container --use
+            - docker buildx inspect --bootstrap
+            - echo "$OCIR_AUTH_TOKEN" | docker login phx.ocir.io -u "$OCIR_USERNAME" --password-stdin
+            - export IMAGE="phx.ocir.io/axcyydnoof5f/studyforge/document-processing"
+            - docker buildx build --platform linux/arm64 --push -t "$IMAGE:${BITBUCKET_COMMIT}" services/document-processing
