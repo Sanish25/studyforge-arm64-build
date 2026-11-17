@@ -1,0 +1,40 @@
+name: StudyForge ARM64 Processing Build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ARM64 image
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Verify runner architecture
+        run: |
+          uname -m
+          test "$(uname -m)" = "aarch64"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build processing image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./services/document-processing
+          platforms: linux/arm64
+          push: false
+          load: true
+          tags: studyforge-processing:arm64-test
+
+      - name: Verify image architecture
+        run: |
+          docker image inspect studyforge-processing:arm64-test \
+            --format '{{.Os}}/{{.Architecture}}'
+          test "$(docker image inspect studyforge-processing:arm64-test \
+            --format '{{.Architecture}}')" = "arm64"
