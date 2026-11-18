@@ -817,3 +817,671 @@ enforce reviewer approval before a future dispatch.
   Gemini factory test omits the OpenAI key with fallback enabled. No backend
   application files were changed by consolidation. Resolve or explicitly
   disposition these before approving the production Django upgrade.
+
+## CodeForge production deployment preflight (preparation only)
+
+This section supersedes older “resume” paragraphs below that say VM access or
+the production worker prerequisites are still unverified. No production
+configuration, service, database, credential, firewall, OCI, registry, or
+Kubernetes state was changed for this preflight. No push or image publication
+was performed.
+
+### Repository and worker image readiness
+
+The current official branch is
+`feature/SCRUM-122-deploy-kubernetes-to-processing`, at `2a4bdd8`, four commits
+ahead of its Bitbucket tracking ref. The four local commits are:
+
+| Commit | Purpose |
+|---|---|
+| `ee4c054` | Development baseline including merged SCRUM-130. |
+| `b62bcec` | Consolidates the five expected SCRUM-122 files. |
+| `8194d0a` | Records the verified VM baseline and cutover plan. |
+| `2a4bdd8` | Corrects the OCI and VM evidence wording. |
+
+The five consolidated files are:
+
+1. `.github/workflows/processing-arm64.yml`
+2. `services/document-processing/oke-worker.yaml`
+3. `scripts/scrum122-oke-connect.sh`
+4. `scripts/scrum122-cloudshell-preflight.py` (retired legacy entry point)
+5. `docs/deployment/scrum-122-oke-worker.md`
+
+The workflow uses manual `workflow_dispatch`, a native ARM64 GitHub runner,
+and builds `services/document-processing` for `linux/arm64`. Its destination is
+`phx.ocir.io/axcyydnoof5f/studyforge/document-processing`. The tag includes
+GitHub SHA, run ID and attempt, and the build digest is recorded. Unique tags
+are not registry-enforced immutability: the Deployment must use the recorded
+`image@sha256:<digest>`, never a tag. The workflow currently verifies the
+pulled tag's platform but does not compare the pulled repository digest with
+the Buildx output digest; compare both explicitly during the approved publish
+stage. `provenance: false` means this workflow does not produce BuildKit
+provenance attestations. The prior OCI inventory found no processing image
+repository. The existing pull Secret is not proof that this repository can be
+pulled.
+
+The intended source candidate is the current official branch tip, `2a4bdd8`,
+because it contains the SCRUM-127 worker source and the reviewed manifest. The
+workflow runs in the GitHub mirror and checks out its dispatch ref. The
+available `github/chore/scrum-122-arm64-pipeline` ref is `27fc947`; compared
+with the candidate it lacks the SCRUM-127 direct-storage worker changes across
+13 processing-service paths. Do not dispatch from that old ref. After separate
+Bitbucket push and mirror approvals, publish only when the mirror ref resolves
+to the approved source SHA. If the worker logging hardening below changes
+service code, publish from the resulting reviewed SHA instead of `2a4bdd8`.
+
+Local checks completed for the current files: actionlint, ShellCheck, Bash and
+Python syntax, YAML syntax parsing, and a scan for common embedded private keys,
+access tokens and credential-bearing Redis/PostgreSQL URLs. Kubeconform parsed
+the manifest but could not download Kubernetes v1.35.2 schemas because this
+environment cannot resolve its schema host. Earlier validation of this draft
+is recorded above; a fresh strict schema result remains pending. No dependency
+was installed to bypass the network restriction.
+
+### Django release candidate and worker contract
+
+SCRUM-127 first entered the integrated development tree at `71be6f5`
+(`0615867`, `981c842`, and `3304583` are its storage/source implementation
+commits). The current API candidate is `2a4bdd8`, whose backend tree contains
+that work. The current VM runs `6c3922fac11f063b1cda14e2d685757c6c262345`.
+A hash-only Git tree comparison (file names, modes and object hashes; no source
+or secrets exported) found 104 changed tracked backend paths. In addition to
+SCRUM-127 documents/storage/auth changes, the candidate includes SCRUM-130
+LLM fallback changes, SCRUM-101 removal of the in-process processing app,
+conversation/message changes, knowledge retrieval and citation changes, note
+options/source changes, quiz/survival-session changes, and shared settings and
+dependency updates. This is a broad application upgrade. Stage and regression
+review the complete release; do not treat it as a storage-only configuration
+change.
+
+The candidate integration contract is:
+
+| Contract | Candidate behavior | Current production state |
+|---|---|---|
+| Job object locator | `GET /internal/v1/jobs/<job_id>/object/`; requires `Authorization: Bearer <PROCESSING_SERVICE_TOKEN>` and S3 mode. Returns document ID, source SHA-256, object key and MIME type. | Route returned 404. |
+| Source retrieval | Worker in `PROCESSING_SOURCE_MODE=s3` calls the locator, then S3 `GetObject`, bounds input to 20 MiB and verifies document ID, MIME and SHA-256. | Django uses filesystem storage; no bucket or worker identity was configured. |
+| Callback | `POST /internal/v1/jobs/<job_id>/result/`; same bearer token, JSON schema validation and idempotent `applied`/`duplicate` outcomes. RUNNING and terminal callbacks update Django job/document state. | GET returned 405, confirming the POST-only route shape; its auth and POST behavior were not exercised because that would mutate state. No service token was loaded. |
+| Task publication | Django sends `processing_service.tasks.process_document_task(job_id, document_id, source_sha256)` to `document-processing`. | The current Django code already publishes this queue; active VM Celery consumes only `celery`. OKE must consume the exact `document-processing` queue. |
+| Worker service state | Standalone `processing_service.settings`, `studyforge_processing` DB, `Execution` table and callback-delivery state. Worker probes DB, authenticated Redis and bucket access before subscribing. | Processing database/role and both processing migrations are absent. |
+
+Required Django release configuration includes `DJANGO_DEBUG=0`,
+`DJANGO_SECRET_KEY`, `DJANGO_ALLOWED_HOSTS`, `POSTGRES_PASSWORD`,
+`POSTGRES_SSLMODE=verify-full`, `POSTGRES_SSLROOTCERT`, authenticated TLS
+`CELERY_BROKER_URL=rediss://...` with `ssl_cert_reqs=required`,
+`PROCESSING_SERVICE_TOKEN`, `DOCUMENT_STORAGE_BACKEND=s3`, bucket/region,
+storage endpoint/addressing/CA and approved credentials, and
+`STUDYFORGE_REQUIRE_SECURE_CONNECTIONS=1`. Keep these values in approved secret
+stores. The API and worker share only the service token; storage identities
+are separate. Do not place values in Git, process arguments, transcripts or
+worker logs.
+
+SCRUM-130 makes `AI_FALLBACK_ENABLED` default to true and requires an
+`OPENAI_API_KEY` when enabled. OpenAI fallback can send feature input to that
+provider and has cost/privacy implications. For this release set
+`AI_FALLBACK_ENABLED=0` unless the application owner separately approves the
+provider, data handling and key. Gemini remains the worker embedding provider.
+
+The live application migration table confirms these candidate migrations are
+pending on `studyforge`: `conversations.0002_conversation_message`,
+`conversations.0003_message_tool_trace`, `notes.0003_note_options_and_sources`,
+and `quizzes.0004_survival_sessions`. Existing `documents.0001` through
+`documents.0003` are applied. The notes migration copies source links before
+changing the relation; inspect row counts and rehearse on a protected database
+copy. Django application migrations belong to the Django release owner and
+the `studyforge` database. Do not apply them as part of worker provisioning.
+
+On the approved release and a protected copy, the plan/execute commands are:
+
+~~~sh
+cd /home/ubuntu/studyforge/backend
+.venv/bin/python manage.py migrate --plan
+# Only after a separate API-migration approval and protected backup:
+.venv/bin/python manage.py migrate --noinput
+~~~
+
+The final live plan must contain only the four pending migrations listed
+above. Stop if it differs or the notes data migration has not been reviewed
+against live row counts. The second command is a gated mutation and was not
+run.
+
+The worker database is separate. It does not exist and has no migration rows.
+Its migrations are `executions.0001_initial` and
+`executions.0002_callback_delivery`, owned by the document-processing service
+release. The checked-in `provision_database.py` creates a database and one
+login role that also owns it. That role is used by the worker settings. This is
+not a strict runtime/migration role split. Before production provisioning,
+either approve that database-scoped ownership risk explicitly or extend the
+provisioning plan to use a non-login owner/migrator and a runtime login with
+only CONNECT, schema USAGE, table SELECT/INSERT/UPDATE, and sequence USAGE/
+SELECT. The runtime task store does not require DELETE. Do not reuse the
+existing Django superuser as the worker identity.
+
+The intended worker DB sequence is:
+
+~~~sh
+cd /home/ubuntu/studyforge/services/document-processing
+# One-shot provisioning only after its role model and secure admin input are approved.
+python provision_database.py
+python manage.py migrate --plan
+# Only after a dedicated DB recovery point and separate approval:
+python manage.py migrate --noinput
+~~~
+
+The current provisioning helper takes administrator credentials through its
+environment, refuses to take over unmarked databases/roles, creates the
+processing database/role, and does not migrate it. It does not implement the
+owner/migrator/runtime split described above. Adapt and review that helper
+before use if that split is selected. Never place its administrator password
+on a command line or in a saved env file. The migration plan must be exactly
+`executions.0001_initial` and `executions.0002_callback_delivery`; stop on any
+other migration or existing unmarked name. Neither command was run.
+
+#### Required worker logging hardening
+
+The pinned worker Celery version is 5.6.3. The task decorator currently sets
+`ignore_result=False`, and `process_document_task` returns the terminal
+callback payload containing extracted text and embeddings. Celery's default
+`resultrepr_maxsize` is 1024 characters and the worker emits task results in
+logs/events. A successful task can therefore place document text in pod logs.
+This is a pre-publication and pre-acceptance blocker. Before any real document
+job, change the task to return a metadata-only receipt (job ID, terminal
+status, delivery status), keep the payload in its existing durable callback
+store only as long as required for retries, and set task result storage off
+where compatible. Add a test that verifies a unique synthetic content marker
+never appears in worker logs or task events. Verify the pinned Celery version's
+behavior in the local image. [Celery task result representation](https://docs.celeryq.dev/en/v5.6.3/reference/celery.app.task.html)
+
+The execution table also stores the full callback payload for redelivery, and
+the current code does not clear that payload after delivery. It contains
+document text and embeddings. Before production acceptance, the data owner
+must approve its access, backup and retention policy, or the implementation
+must retain only a safe receipt/fingerprint after confirmed delivery. Do not
+delete existing execution rows or payloads as a rollback operation.
+
+### OCI profile recovery and network evidence
+
+The primary `studyforge-scrum122` profile now has the supplied authorized user
+OCID; its tenancy and Phoenix region matched. Its existing security-token
+session is expired and OCI reports that it can no longer be refreshed. The
+owner must complete browser authentication to renew the session using the
+existing public/private key pair. Do not create a user, API key or IAM policy,
+or switch authentication modes. After session renewal, the principal needs
+read-only access to the cluster, VNICs, subnets, route tables, security lists
+and NSGs. [OCI configuration fields](https://docs.oracle.com/en-us/iaas/Content/API/Concepts/sdkconfig.htm),
+[OCI authentication methods](https://docs.oracle.com/en-us/iaas/Content/API/Concepts/sdk_authentication_methods.htm)
+
+The previous OCI inventory recorded the VM VNIC at `10.0.0.234` on subnet
+`10.0.0.0/24`, no VM NSG, OKE pod subnet `10.0.1.0/24`,
+`OCI_VCN_IP_NATIVE`, frontend pod `10.0.1.32`, and worker node
+`10.0.1.63`. The VCN is `10.0.0.0/16`; earlier route-table inspection showed
+no VNIC route-table override. The OKE pod NSG is
+`studyforge-oke-pods-nsg`; the API VNIC and source NSG OCIDs are recorded in
+the earlier Revised network proposal. These are prior observations, not a
+current OCI inventory: refresh them before approval. OCI rules on a VNIC are
+the union of the subnet security lists and every attached NSG; any permissive
+rule can allow traffic. [OCI OKE pod network requirements](https://docs.oracle.com/en-us/iaas/Content/ContEng/Concepts/contengnetworkconfig.htm),
+[NSG rule management](https://docs.oracle.com/en-us/iaas/Content/Network/Concepts/manage-nsg-security-rules.htm)
+
+Before a network approval, refresh and record:
+
+1. VM VNIC private/public IPv4 and any IPv6 addresses, subnet, every NSG
+   membership, subnet security lists and effective ingress rules.
+2. OKE cluster CNI, worker-node and pod subnets, pod and node VNIC/NSG
+   membership, route tables, security lists, and effective egress.
+3. Whether the source is a VCN-native pod IP or a node/NAT IP. Confirm with a
+   controlled OKE probe and server-side connection metadata; do not guess the
+   PostgreSQL/HBA or Docker firewall source.
+4. VCN routes between `10.0.1.0/24` and `10.0.0.0/24`; public subnet IGW
+   routing; NAT/service gateway routes; any IPv6 route or prefix.
+5. Host IPv4 and IPv6 addresses, `iptables`/nftables INPUT and FORWARD,
+   Docker DNAT and `DOCKER-USER`, and listening sockets after the proposed
+   Compose binds.
+6. After the host is TLS/auth ready, allow only stateful TCP 5432 and 6380
+   from the verified OKE pod NSG to the VM VNIC through a new dedicated NSG.
+   Preserve all existing VNIC memberships. Add no public CIDR rule and no
+   IPv6 database/broker rule. The exact port 6380 is contingent on the Redis
+   TLS listener being approved and validated.
+
+Do not infer public reachability from `0.0.0.0` listeners alone. Prior OCI
+inventory found public-subnet ingress on 22/80/443 only and no 5432/6379
+rule, but the current profile cannot refresh the union of VM rules or IPv6
+state. Docker DNAT sends published container ports through FORWARD, so an
+INPUT-only host reject does not prove they are blocked. Use the fresh OCI
+rules, IPv4/IPv6 routes, host forwarding policy and a controlled external
+reachability check to decide actual exposure. Keep the ports unpublished on
+public interfaces regardless.
+
+### Redacted proposed configuration
+
+These are templates only. Replace the bracketed values only after the
+endpoint, source address, certificate name, CA and secret store are approved.
+
+Compose host publication, preserving the current host-local Django path while
+limiting the remote service to the VM private IPv4 interface:
+
+~~~yaml
+services:
+  db:
+    ports:
+      - "127.0.0.1:5432:5432"
+      - "10.0.0.234:5432:5432"
+  redis:
+    ports:
+      - "127.0.0.1:6379:6379" # temporary legacy host-only path
+      - "10.0.0.234:6380:6380" # only after Redis TLS config listens on 6380
+~~~
+
+The Redis container would listen on 6379 for the host-local transition and
+6380 for authenticated TLS. Remove its 6379 publication and disable its
+plaintext listener only after all verified producers and consumers use TLS.
+Do not add a wildcard bind. Current host apps connect to 127.0.0.1; verify
+every other consumer before changing mappings.
+
+Illustrative IPv4 Docker forwarding policy (not executable until the exact
+pod source, host interface, Docker chain behavior, order and persistence are
+verified):
+
+~~~sh
+iptables -I DOCKER-USER 1 -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
+iptables -I DOCKER-USER 2 -i enp0s6 -s <verified-pod-cidr> -p tcp \
+  -m conntrack --ctorigdst 10.0.0.234 --ctorigdstport 5432 -j ACCEPT
+iptables -I DOCKER-USER 3 -i enp0s6 -p tcp \
+  -m conntrack --ctorigdst 10.0.0.234 --ctorigdstport 5432 -j DROP
+iptables -I DOCKER-USER 4 -i enp0s6 -s <verified-pod-cidr> -p tcp \
+  -m conntrack --ctorigdst 10.0.0.234 --ctorigdstport 6380 -j ACCEPT
+iptables -I DOCKER-USER 5 -i enp0s6 -p tcp \
+  -m conntrack --ctorigdst 10.0.0.234 --ctorigdstport 6380 -j DROP
+~~~
+
+Keep host-loopback and Docker bridge traffic working; test rule order and
+return packets in a protected clone. Persist only with an approved Docker-aware
+mechanism. Verify IPv6 has no bound listener or permitting NSG/security-list
+path; do not assume an IPv4 rule covers IPv6.
+
+Redis server configuration template for a server-certificate TLS listener
+with Redis ACL authentication (use `tls-auth-clients no` only if the approved
+design is TLS server authentication plus ACL credentials; if mutual TLS is
+required, add client-certificate mounts and corresponding worker/Django client
+settings instead):
+
+~~~conf
+port 6379
+tls-port 6380
+tls-cert-file /run/redis/tls/server.crt
+tls-key-file /run/redis/tls/server.key
+tls-auth-clients no
+aclfile /run/redis/acl/users.acl
+protected-mode yes
+# Preserve the currently observed RDB save policy during the TLS change.
+# Do not change appendonly/maxmemory policy in the same unreviewed edit.
+~~~
+
+Both application broker URLs must use the approved ACL identity on DB 0 and
+the trusted Redis name/IP, for example
+`rediss://<named-user>:<url-encoded-secret>@10.0.0.234:6380/0?ssl_cert_reqs=required&ssl_ca_certs=/etc/studyforge/trust/redis-ca.pem`.
+The exact Redis ACL command, key-pattern and Pub/Sub-channel grants are not
+known. Derive and test them with the pinned Celery/Kombu/redis-py versions in
+isolated Redis before production; do not use `+@all`, `~*`, or guessed
+permissions. Preserve the existing queue names and Celery key namespace so
+messages are not stranded. [Docker original-destination filtering](https://docs.docker.com/engine/network/firewall-iptables/),
+[PostgreSQL TLS](https://www.postgresql.org/docs/16/ssl-tcp.html),
+[Redis TLS](https://redis.io/docs/latest/operate/oss_and_stack/management/security/encryption/)
+
+PostgreSQL server TLS configuration and HBA order template:
+
+~~~conf
+ssl = on
+ssl_min_protocol_version = 'TLSv1.2'
+ssl_cert_file = '/run/postgresql/tls/server.crt'
+ssl_key_file = '/run/postgresql/tls/server.key'
+
+# Insert before the existing broad host SCRAM rule. Use the source actually
+# observed from OKE and preserve separately verified Django host entries.
+hostssl    studyforge_processing studyforge_processing <verified-OKE-source-CIDR> scram-sha-256
+hostnossl  all                  all                  <verified-OKE-source-CIDR> reject
+host       all                  all                  <verified-OKE-source-CIDR> reject
+~~~
+
+The server certificate must include the actual verified-full client hostname
+or IP SANs for Django and OKE. If both connect by IP, include 127.0.0.1 and
+10.0.0.234, or choose an approved private DNS name and route both clients to
+it. Mount the server private key read-only with owner/mode readable by the
+container's PostgreSQL process only; verify numeric UID, effective file mode
+and restart behavior. Keep existing application DB access until TLS has been
+validated from Django and OKE. Do not alter the existing `studyforge` role.
+
+For OCI Object Storage S3 compatibility, a candidate endpoint format is
+`https://<namespace>.compat.objectstorage.us-phoenix-1.oci.customer-oci.com`
+with path-style addressing, region `us-phoenix-1`, and a private bucket. Confirm
+namespace, supported endpoint and region against the tenancy before use. The
+worker's boto3 code uses AWS-style access-key/secret-key credentials and the
+manifest disables EC2 metadata. It has no OCI-native resource-principal
+adapter. An OCI S3-compatible deployment therefore needs an approved Customer
+Secret Key identity or a separately reviewed workload-identity code change.
+Do not create that identity/key during this preparation. OCI policy templates
+should separate worker bucket inspection/GetObject from Django write/read/delete
+on the approved document prefix; add required bucket inspection for the
+worker's `HeadBucket` readiness probe. Scope policies to the selected bucket
+and `documents/` objects where supported. [OCI S3 compatibility](https://docs.oracle.com/en-us/iaas/Content/Object/Tasks/s3compatibleapi.htm),
+[Customer Secret Keys](https://docs.oracle.com/en-us/iaas/Content/Identity/access/working-with-customer-secret-keys.htm),
+[OCI Object Storage least privilege](https://docs.oracle.com/en-us/iaas/Content/Identity/Concepts/commonpolicies.htm)
+
+For an OCI Object Storage provider, these are policy-review templates only:
+
+~~~text
+Allow group <worker-read-group> to inspect buckets in compartment <compartment> where target.bucket.name='<bucket>'
+Allow group <worker-read-group> to read objects in compartment <compartment> where target.bucket.name='<bucket>'
+Allow group <django-storage-group> to inspect buckets in compartment <compartment> where target.bucket.name='<bucket>'
+Allow group <django-storage-group> to manage objects in compartment <compartment> where all {target.bucket.name='<bucket>', target.object.name='documents/*', any {request.permission='OBJECT_CREATE', request.permission='OBJECT_READ', request.permission='OBJECT_DELETE', request.permission='OBJECT_INSPECT'}}
+~~~
+
+Have the OCI IAM owner validate the exact permissions required by the S3
+compatibility API and Django's upload/read/delete calls; do not grant bucket
+management to either application identity. The worker identity must not receive
+object create, overwrite or delete permission. No group, user or key is created
+by this preflight.
+
+The worker runtime configuration in `oke-worker.yaml` expects:
+
+| ConfigMap/runtime value | Secret/trust value |
+|---|---|
+| `PROCESSING_DB_HOST`, `PROCESSING_DB_PORT`, `PROCESSING_DB_NAME`, `PROCESSING_DB_USER`; `PROCESSING_DB_SSLMODE=verify-full`, `PROCESSING_DB_SSLROOTCERT` | `PROCESSING_DB_PASSWORD`; trusted `postgres-ca.pem` |
+| `PROCESSING_SOURCE_MODE=s3`, `PROCESSING_STORAGE_BUCKET`, `PROCESSING_STORAGE_REGION`, optional HTTPS endpoint/addressing/CA | Optional storage access/secret pair and session token; worker identity limited to bucket inspection and object reads |
+| `PROCESSING_DJANGO_API_URL=https://studyforge-rodians.duckdns.org`, `PROCESSING_REQUIRE_DIRECT_STORAGE=1`, `STUDYFORGE_REQUIRE_SECURE_CONNECTIONS=1`, `AWS_EC2_METADATA_DISABLED=true` | Matching `PROCESSING_SERVICE_TOKEN`; `PROCESSING_SECRET_KEY`; `GEMINI_API_KEY`; authenticated `PROCESSING_REDIS_URL` with `rediss://` and `ssl_cert_reqs=required` |
+| `DJANGO_SETTINGS_MODULE=processing_service.settings`, queue `document-processing`, visibility timeout 3600, Gemini embedding model/dimension/batch | Optional Redis and S3 public CA files only; never place private keys in a ConfigMap |
+
+Use the approved Kubernetes Secret integration. Do not use `kubectl
+create secret --from-literal` or print Secret YAML. The existing
+`studyforge-processing-secrets` object must be provisioned from the approved
+secret store after a separate approval. Keep `ocir-pull-secret` unchanged.
+Before storing worker credentials, the OKE owner must confirm namespace RBAC,
+who can read Secrets, and the cluster's at-rest encryption/key-management
+configuration; these were not verified in the previous inventory.
+
+### Staged production plan and approval gates
+
+Every stage below remains unapproved and unexecuted. Stage owners are role
+assignments; Aashish's explicit SSH/sudo authorization did not authorize these
+changes. Expected impact and rollback are conditional on rehearsal in staging.
+
+| Stage / owner | Scope and proposal | Backup, validation, stop conditions and rollback | Approval |
+|---|---|---|---|
+| 0. Revalidate and stage / OCI read-only operator, VM operator, release owners | Owner completes browser renewal of the existing security-token session. Then refresh VNIC/NSG/route/IPv6 inventory, Compose consumers, backup status, current Django baseline, queue consumers and job/document counts. Agree on provider, bucket, CA/SANs, secrets path, change window and owners. | No outage. Stop if authentication fails, effective OCI exposure is unknown, backup/restore cannot be proven, or owner/secret sources are missing. No rollback required. | Read-only OCI auth is required; no mutation approval. |
+| 1. Restrict Compose env file / VM security owner | Change only `/home/ubuntu/studyforge/.env` from observed mode 0664 to owner-only 0600, preserving ubuntu ownership, after confirming Compose is operated as ubuntu. If another service identity needs access, choose a dedicated restricted group and 0640 instead. Do not edit values or rotate credentials here. | No service restart expected because running containers already have their environment. Record current owner/mode; verify ubuntu can read it and run quiet Compose config validation without printing output. Stop if the runtime/deploy user is unclear. Roll back only to a non-world-readable mode and the documented owner/group; never restore 0664 as a general rollback. | Separate host/security approval for this file's mode only. |
+| 2. Storage identity and CA preparation / OCI storage-IAM owner, security owner | Select/create a private encrypted bucket, region and S3 endpoint; provision separate Django write and worker inspect/read identities; approve CA and SANs for PostgreSQL/Redis; deliver public roots and private server keys through approved stores. The worker S3 identity must support HeadBucket and GetObject and must not write/delete. | No application outage. Validate in staging: TLS name/CA, bucket privacy, Django upload/read/delete permissions, worker HeadBucket/GetObject, denied worker write/delete, and SHA-256 equality. Stop on unknown bucket owner, broad IAM policy, untrusted cert, absent secure secret delivery or unsupported identity adapter. Roll back by revoking only newly issued access and retaining any test object until verified cleanup is separately approved. | Separate cloud/IAM, bucket, certificate and credential approvals. |
+| 3. PostgreSQL endpoint and processing DB / VM DBA, Django DB owner | Back up current `studyforge`; add PostgreSQL TLS without changing existing application data. Restrict Docker publication to loopback plus VM private IPv4, not public wildcard. Add ordered OKE-source `hostssl` SCRAM rule and plaintext/other-DB rejects after verifying packet source. Provision `studyforge_processing` and separate runtime/migration roles; apply only `executions.0001_initial` and `0002_callback_delivery` to that DB. | A PostgreSQL restart is expected and may briefly interrupt Django sign-in/uploads. Backup the app DB and current Compose/HBA/cert files first; the new processing DB has no data yet. Validate Django and worker `SELECT 1` with verify-full, `pg_stat_ssl`, allowed/denied HBA paths, database isolation and exact schema. Stop on SAN mismatch, unexpected client source, role mismatch, failed restore/backup or unexpected migration plan. Rollback closes OKE ingress first, restores prior PostgreSQL TLS/HBA/Compose configuration while retaining both DB volumes; never drop either DB or restore over newer application data. | Separate VM/DB change and migration approvals; maintenance window. |
+| 4. Redis TLS, ACL and durability / VM Redis owner, Celery owner | Add private TLS listener 6380 with approved server trust, named producer/legacy-consumer/OKE-worker ACL users, and URL `rediss://` on database 0. Preserve queue names and key namespace. Keep legacy port 6379 loopback-only only during a tightly scoped transition; remove it after every verified client uses TLS. Do not stop the current `celery` consumer until its non-document responsibilities are mapped. | Redis restart can interrupt uploads and pending tasks. First quiesce producers/workers in the approved window; take and verify a fresh protected RDB/volume backup (`rdb_changes_since_last_save=0`, successful BGSAVE) because AOF is off and current data had 38 unsaved changes. Reconcile queue/unacked counts. Validate auth/TLS hostname/CA, anonymous and plaintext rejection at the final listener, publish/receive/retry/ack in staging, and legacy consumer compatibility. Stop on unknown consumers, failed backup, ACL denials or queue drift. Roll back listener/client configuration together while preserving the volume and queue contents; never FLUSH, delete, or blindly replay messages. Review AOF separately for disk/latency impact; do not enable it implicitly in this change. | Separate Redis, ACL and persistence approval; maintenance window. |
+| 5. Django application release / Django release owner, DBA, storage owner | Deploy the approved API candidate with S3, secure PostgreSQL/Redis, service token, readiness, locator and callback. Apply pending Django migrations on `studyforge` only after plan/backup approval. Keep `AI_FALLBACK_ENABLED=0` unless OpenAI use is approved. Preserve the VM Celery consumer for other queues; it currently consumes `celery`, not `document-processing`. | Brief API restart/maintenance may interrupt uploads/auth. Take a consistent protected database backup and rehearse candidate and migrations on a production-like copy. At the live window pause new uploads, re-count documents/media, verify exact migration plan, run checks, apply approved migrations, start API, then verify health/readiness, existing auth and upload/read/delete, S3, TLS broker and authenticated locator/callback on a controlled fixture. Stop on any unexpected migration, missing storage objects, upload failure, DB/Redis TLS failure or callback auth failure. Roll back API code/config only if backward-compatible with already-applied schema and S3 writes; preserve migration state and both storage copies. Never reverse data migrations automatically; reconcile writes before routing back. | Separate API release, application DB migration, storage cutover and downtime approval. |
+| 6. Private network path / OCI network owner, VM security owner | After PostgreSQL/Redis TLS/auth and host DOCKER-USER controls pass, attach a new dedicated API-VNIC NSG permitting only stateful TCP 5432 and 6380 from the refreshed OKE pod NSG. Preserve all current VNIC NSGs and public web rules. Host forwarding separately permits only verified pod sources. | No planned app interruption; new path only. Validate exact effective rule union, private route, OKE source, successful TLS/auth from OKE and denied public/other-source access for IPv4 and IPv6. Stop if any wildcard/pubic exposure, unexpected VNIC membership, source translation or unverified TLS. Roll back by detaching only the new NSG using a fresh membership snapshot and removing only its rules; retain all existing groups. | Separate OCI network and host-firewall approval. |
+| 7. Publish and prepare OKE / repo maintainer, GitHub/OCIR owner, OKE namespace owner | After worker logging fix and successful local validation, approve Bitbucket push and mirror exact candidate SHA. Create the private OCIR repository only if a fresh inventory confirms it is absent. Dispatch workflow manually on the exact mirror SHA; compare Buildx digest with registry-pulled digest and verify `linux/arm64`. Create approved ConfigMaps, trust, Secret, ServiceAccount and one worker Deployment pinned by digest. | No Django/VM interruption expected from a worker probe. Verify pull secret type/host, no name collisions, exact source SHA/image digest, ARM64 placement, startup/readiness checks for DB/Redis/bucket, and no public Service/Ingress. Stop on a mismatched SHA/digest, pull failure, secret/trust error, non-ARM node or dependency not ready. Rollback removes only this rollout's worker/probe/config resources; leave frontend and data unchanged. Do not delete registry artifacts as rollback. | Separate Git push, OCIR repository/publication and Kubernetes mutation approvals. Secret provisioning is a separate approval. |
+| 8. End-to-end acceptance / product owner, Django owner, worker owner | With one user-approved non-sensitive document, submit through StudyForge and let one ARM64 OKE worker consume the exact task. | Validate every criterion in the acceptance section below; stop on any mismatch, duplicate/unknown job, content in logs, unhealthy existing service, or unexpected public path. Rollback stops only the new worker and removes only its newly created configuration; retain the document/job/results for investigation. | Explicit approval for one real production document and any task-event observation. |
+
+### End-to-end acceptance evidence
+
+Do not use a document until its owner approves it as non-sensitive. Keep the
+test's application-visible effects and retention period approved. Do not log
+document text, object key, bearer token, Redis URL, DB password or S3 key.
+
+1. Record document ID, job ID and source SHA-256 from the authorized
+   application/DB view. Do not expose the object key. Confirm the locator
+   response has matching document ID/hash/MIME and an internal key, then verify
+   the worker's read-only S3 identity can fetch and hash the same bytes.
+2. Record Django's task name, `document-processing` queue and task arguments
+   (job ID, document ID, SHA-256). Enable a short-lived, access-controlled
+   Celery event observer only if approved. Correlate Celery task UUID to the
+   received message and worker pod UID/name. Do not persist event payloads
+   beyond the approved evidence window.
+3. Capture the worker pod UID, Ready ARM64 node, image ID/digest, start/end
+   timestamps and task UUID. Confirm worker readiness before queue consumption.
+4. Confirm the processing `Execution` row matches job ID, document ID and
+   SHA-256, reaches SUCCEEDED, and callback delivery reaches DELIVERED. Confirm
+   Django's job is SUCCEEDED and document is READY with expected page count and
+   persisted chunks. Keep IDs/hash in the restricted change record only.
+5. Confirm the application exposes the successful document result to its owner,
+   existing frontend and Django health/readiness remain healthy, the legacy
+   Celery queue remains healthy, and no unrelated task was consumed.
+6. Confirm public IPv4/IPv6 ports 5432, 6379 and 6380 remain unreachable and
+   only the verified OKE source can establish authenticated TLS. Preserve
+   sanitized command outputs, DB status metadata, pod/image metadata and
+   callback outcome; exclude payloads and credentials.
+
+The application does not persist a Celery task UUID in `Job` or `Execution`.
+For one-time correlation, collect the task-received event/worker UUID together
+with its three identity arguments and pod UID. The logging hardening above is a
+precondition so task results/events contain only a metadata receipt.
+
+### External owners, unresolved assumptions and go/no-go
+
+Required external inputs are: browser renewal of the existing OCI session and
+read-only access; fresh OCI route/NSG/VNIC and IPv6 inventory; named VM DBA and Redis/Celery
+owners; approved database/Redis certificate names and CA; approved secret
+store; storage provider, compartment, namespace, bucket and least-privilege
+identities; review of production migration plans; GitHub mirror synchronization
+and OCIR repository/push approval; product owner for the test document; and an
+approved maintenance window. No storage bucket, worker credential, private CA,
+new OCIR repository or workload secret has been verified as available.
+
+**Current recommendation: NO-GO for publish, Django release, migration, network
+opening or worker deployment.** Preparation may advance once the expired OCI
+session is renewed and other owners supply required inputs. The hard stop conditions
+are unresolved TLS/auth for PostgreSQL and Redis, missing processing DB and
+migrations, missing storage and service credentials, absent S3 locator in the
+live API, outstanding full-backend release regression, unverified OCI effective
+exposure, and a stale GitHub mirror. The
+smallest safe first production mutation is the separately approved mode-only
+change in Stage 1; it does not deploy SCRUM-122. The first SCRUM-122 service
+change must wait for fresh backups and the full Stage 3/4 maintenance approvals.
+
+## OCI access recovery and local security hardening (updated 2026-11-18)
+
+This section supersedes the 2026-11-17 note that the authorized user OCID was
+missing. Aashish supplied the user, tenancy and root-compartment identifiers;
+the tenancy equals the root compartment. The existing primary profile's
+tenancy and `us-phoenix-1` region matched. Before editing, a mode-0600 backup
+was made at `~/.oci/config.scrum122.pre-repair.20261118T060830Z`. Only the
+`user` field in profile `studyforge-scrum122` was added. Its authentication
+mode, signing key, fingerprint, and token-file path were preserved; the
+secondary `studyforge-scrum122-local` profile was not edited. Local verification
+confirmed the configured public key matches the private key and fingerprint;
+key and token contents were not printed.
+
+`oci session validate --profile studyforge-scrum122 --auth security_token
+--local` reports `Session has expired`. A read-only `oci iam user get` attempt
+was refused by the CLI because the session expired. The authorized
+`oci session refresh --profile studyforge-scrum122 --auth security_token`
+returned: “Your session is no longer valid and cannot be refreshed. Please use
+`oci session authenticate` to create a new session.” Authentication and remote
+identity validation therefore remain incomplete; this is an expired session,
+not an observed IAM permission denial.
+
+The user must complete browser sign-in (and any required MFA) to renew the
+session while reusing the existing key pair. The CLI command is:
+
+~~~sh
+oci session authenticate --region us-phoenix-1 \
+  --profile-name studyforge-scrum122 \
+  --public-key-file-path "$HOME/.oci/sessions/studyforge-scrum122/oci_api_key_public.pem"
+~~~
+
+The public key path exists and matches the configured private key. After the
+interactive browser step, validate with
+`oci session validate --profile studyforge-scrum122 --auth security_token`,
+then repeat the minimal read-only identity lookup before inventory. No IAM
+permissions were changed or escalated.
+
+### OCI inventory and exposure status
+
+OCI inventory could not be refreshed because authentication expired. There is
+no new evidence for resource compartments, the VM VNIC and IPv6 state, current
+OKE node-pool health, current
+security-list/NSG unions, current routes, OCIR repository metadata, or object
+storage metadata. The confirmed prior inventory remains historical: the API
+VM had private address `10.0.0.234` on `10.0.0.0/24`, OKE was
+`OCI_VCN_IP_NATIVE` with pod subnet `10.0.1.0/24`, one active ARM64 node was
+observed, and the VCN was `10.0.0.0/16`. A previous pod connection to the VM on
+5432 and 6379 failed. The prior subnet security-list evidence allowed public
+22/80/443 and had no 5432/6379 rule; this was not a refreshed effective-rule
+union and did not establish IPv6 behavior. Do not treat the previous node or
+cluster status as current.
+
+Exposure is separated into the following evidence:
+
+| Layer | Existing evidence | Conclusion |
+|---|---|---|
+| Service binding | PostgreSQL listened on `0.0.0.0:5432` and IPv6 wildcard; Redis listened on `0.0.0.0:6379` and IPv6 wildcard. | Both were wildcard-bound. |
+| Docker publication | Compose published host ports 5432 and 6379 on IPv4 and IPv6 wildcards. | Both were externally addressable at the Docker host-port layer. |
+| Host firewall | IPv4 INPUT allowed 22/80/443 and rejected other inbound traffic; Docker DNAT traversed FORWARD. `DOCKER-USER` was empty and Docker accepted the container destinations. | INPUT policy alone does not block these forwarded ports; effective host forwarding protection was not present in the captured rules. IPv6 forwarding policy was not confirmed. |
+| OCI network permission | The prior subnet security list had no public 5432/6379 rule, but the current union of all NSGs/security lists and IPv6 rules is unknown. | Prior evidence did not show a public OCI allow; current effective permission is unverified. |
+| External reachability | No controlled public IPv4/IPv6 connection test was recorded. | Public reachability is not verified. Wildcard binding and Docker publication are a potential exposure finding, not proof of Internet reachability. |
+
+Keep this as a separate security finding until the OCI rule union and host
+forwarding behavior are refreshed. If a fresh rule permits public database or
+broker traffic, propose the smallest immediate containment: remove only that
+public ingress rule after recording its exact resource and dependencies, while
+keeping SSH/HTTP/HTTPS and all existing NSG memberships intact. Do not execute
+that change without a separate approval. Regardless, the target design must
+bind PostgreSQL only to loopback and the VM private IPv4 address, and Redis
+TLS only to the VM private IPv4 address; do not publish either service on a
+wildcard or IPv6 address.
+
+The previous `OCI_VCN_IP_NATIVE` evidence makes the worker pod's VCN address
+and `studyforge-oke-pods-nsg` the leading source candidates. They are not yet
+confirmed for the actual worker. Refresh pod subnet, pod/node VNIC and NSG
+membership, routes, and observed connection source before selecting a rule.
+If the pod NSG is confirmed, the narrow proposal is: add a dedicated NSG to the
+API VNIC with stateful ingress TCP 5432 and 6380 only from that source NSG; add
+matching OKE pod NSG egress only to the API NSG on those ports if current
+effective egress requires it; and add a Docker `DOCKER-USER` allow for the
+verified source followed by a deny for other remote traffic to those original
+destinations. Bind 5432 and Redis TLS 6380 to `10.0.0.234`; keep legacy Redis
+6379 loopback-only during an approved transition, then remove it after all
+clients use TLS. Preserve established and loopback flows. Add no public or
+IPv6 database/broker rule. This proposal depends on confirming the exact pod
+source, VNIC membership, route and Docker rule ordering.
+
+No database/broker TLS, authentication, role, storage, OCI, firewall, route,
+Kubernetes, or production service setting was changed.
+
+### Worker telemetry hardening and validation
+
+The task has no repository consumer of its Python return value; Django consumes
+the authenticated HTTP callback. The task now returns only `job_id`,
+`document_id`, `attempt`, and terminal `status`, and sets `ignore_result=True`.
+The successful callback still carries the same chunks and embeddings through
+the same authenticated/idempotent callback path, and the retry budget and
+delivery state transitions remain unchanged. Generic document-processing
+failures now retain a permanent task failure and FAILED callback while using a
+constant message without the original exception or chained traceback. Gemini
+provider failures and PDF/Office parser failures also suppress unsafe
+exception details/chains. No second processing path was added. Existing
+page-count logging records only aggregate counts, not text.
+
+Focused regression coverage uses a unique synthetic document marker and
+synthetic embedding value. It confirms callback content is unchanged while
+Celery's returned representation contains neither marker nor vector, task
+result storage is ignored, provider exception details are not returned or
+chained, and generic task failures do not reveal the source exception. Full
+worker validation ran with the built image and Docker engine reporting
+`linux/arm64` / `aarch64`: the 70 service tests passed in the API container and
+both ARM64 worker containers; all 23 execution-store and callback-delivery
+tests passed; worker registration/queue checks, migrations/drift, isolation,
+restart persistence and Redis-outage checks passed. The disposable Compose
+containers, network and database volume were removed. This is local worker
+runtime and test evidence, not a real production document job or end-to-end
+OKE acceptance. `actionlint`, ShellCheck, Python compilation, YAML syntax and
+`git diff --check` passed. Kubeconform could not retrieve Kubernetes schemas
+because DNS/network access to `raw.githubusercontent.com` is unavailable; no
+schema verdict is claimed.
+
+The durable callback payload is still retained in `Execution.callback_payload`
+after delivery. Before delivery, it is required to replay exactly the same
+terminal callback after a worker retry/crash; the job-unique execution record
+prevents duplicate processing, and staging keeps the first terminal payload.
+The HTTP callback is idempotent. If Django accepts the callback but the worker
+crashes before local `mark_delivered`, local state remains PENDING and a retry
+resends the saved payload; Django answers `duplicate`, after which local state
+can be marked DELIVERED. No other repository consumer was found for the stored
+payload. The safe follow-up retention design is to keep the complete payload
+until DELIVERED, then in one transaction replace it with a minimal receipt and
+retain a SHA-256 fingerprint plus delivery status/timestamp. A repeated task
+for a delivered execution must return that receipt without reprocessing or
+resending. This needs execution-store changes, a fingerprint migration if
+retained in a dedicated field, tests for the callback-success/local-crash
+window, and execution-data-owner approval. It was not implemented; no
+production or local database rows were changed.
+
+### Test failures, publication, and Django release
+
+Two previously reported failures are outside SCRUM-122 and were not changed:
+
+1. `backend/apps/knowledge/tests/test_questions_api.py` uses undefined
+   `RetryableProcessingError` in `test_failed_search_raises_without_a_trace`;
+   the module already imports `RetryableQueryEmbeddingError`, the expected
+   knowledge embedding exception. This is a test defect, owned by the
+   Knowledge/RAG feature maintainer. Proposed change: use the imported
+   `RetryableQueryEmbeddingError` at that line and run the focused Knowledge
+   suite. No weakening of the assertion is needed.
+2. `backend/tests/test_gemini.py::GeminiTests.test_factories_use_gemini_key_and_native_client`
+   called the Gemini factory while SCRUM-130 fallback defaults to enabled but
+   did not configure an OpenAI key. The code correctly requires that key when
+   fallback is enabled. This was a test environment/configuration defect, not
+   an application regression. The test now explicitly sets
+   `AI_FALLBACK_ENABLED=false` for its Gemini-only factory assertion; separate
+   enabled-fallback tests remain. The owner-approved local test correction is
+   isolated in `backend/tests/test_gemini.py` for SCRUM-130 review.
+
+The focused Gemini and SCRUM-130 fallback suite passed in an isolated Python
+3.12/PostgreSQL test environment: 25 tests and 13 subtests passed. The
+Knowledge/RAG undefined `RetryableProcessingError` remains unchanged for its
+feature owner to review.
+
+The manual ARM64 workflow remains the only publisher and retains its unique
+SHA/run/attempt tag, protected GitHub secrets, explicit `linux/arm64` build,
+and source-revision labels. It now compares the pulled OCIR repository digest
+with Buildx's output digest, fails on mismatch, and records the immutable
+`image@sha256:<digest>` reference in the run summary. The Kubernetes Deployment
+continues to require a digest reference. `actionlint` passed. The workflow was
+not dispatched, no credentials were used, and nothing was published. The
+worker source candidate is this reviewed working tree based on branch HEAD
+`2a4bdd8`, including the local telemetry hardening. Until a review commit is
+approved and mirrored to GitHub at that exact SHA, there is no publishable
+candidate SHA.
+
+The currently integrated development ref is `origin/development` at
+`ee4c054`; SCRUM-127 integration revision `71be6f5` is its ancestor. The API
+tree comparison to the production checkout was previously recorded as 104
+changed backend paths for the feature candidate, including SCRUM-127,
+SCRUM-130, SCRUM-101 and other application work. The 2a4bdd8 branch is not a
+production Django release recommendation. Select and review the backend
+release separately from the worker image; require Django/backend owner
+approval, migration plan and full backend regression on a protected copy. The
+processing database's two migrations remain separately owned by the worker
+service release.
+
+### Current readiness and proposed commit grouping
+
+No commit was created. The local uncommitted runbook work is preserved and
+expanded; all code, test and workflow changes remain uncommitted for review.
+The candidate worktree does not authorize publication or deployment. The
+profile identity fields are repaired, but the user must complete the browser
+session renewal above before read-only OCI authentication and inventory can
+continue.
+
+For later review, keep these as separate logical commits:
+
+1. **SCRUM-122 worker logging hardening:** `tasks.py`,
+   `embedding_service.py`, `document_parser.py`, `pdf_parser.py`,
+   `processing_service/tests/test_tasks.py`,
+   `processing_service/tests/test_embedding_service.py`, and
+   `executions/tests.py`.
+2. **SCRUM-122 ARM64 publication and deployment record:**
+   `.github/workflows/processing-arm64.yml` and this runbook.
+3. **SCRUM-130 test isolation:** `backend/tests/test_gemini.py`, kept separate
+   for its owner’s review and later integration.
+
+Current recommendation remains **NO-GO for all production mutations**. Fresh
+OCI/network inventory, TLS and ACL design, storage/identity availability,
+approved secret delivery, API release choice, protected backups, and change
+owners are unresolved. Local code/workflow changes are for human review only.
+No production file, service, database, firewall, OCI resource, credential,
+image, Git remote, or Kubernetes resource was changed.
