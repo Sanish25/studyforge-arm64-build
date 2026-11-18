@@ -163,7 +163,8 @@ class OpenAIStudyGuideLLM:
         if not key:
             raise LLMError("OPENAI_API_KEY is not set")
 
-        self.name = os.environ.get("NOTES_LLM_MODEL", DEFAULT_MODEL)
+        from apps.llm_config import openai_model
+        self.name = openai_model("notes", DEFAULT_MODEL)
         self._single_pass_limit = int(
             os.environ.get("NOTES_SINGLE_PASS_LIMIT", DEFAULT_SINGLE_PASS_LIMIT)
         )

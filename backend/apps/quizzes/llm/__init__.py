@@ -28,9 +28,16 @@ def get_client():
         return FakeQuizLLM()
 
     if backend == "gemini":
+        from apps.llm_config import fallback_enabled, require_openai_key
         from apps.quizzes.llm.gemini import GeminiQuizLLM
+        from apps.quizzes.llm.provider import OpenAIQuizLLM
+        from apps.llm_fallback import FallbackClient
 
-        return GeminiQuizLLM()
+        primary = GeminiQuizLLM()
+        if not fallback_enabled():
+            return primary
+        require_openai_key()
+        return FallbackClient(primary, OpenAIQuizLLM, feature="quizzes")
 
     if backend == "openai":
         from apps.quizzes.llm.provider import OpenAIQuizLLM

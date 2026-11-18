@@ -175,7 +175,8 @@ class OpenAIRAGLLM:
     """Dedicated OpenAI text client; SDK client injection avoids real API calls."""
 
     def __init__(self, client=None):
-        self.name = os.environ.get("RAG_LLM_MODEL", DEFAULT_MODEL).strip()
+        from apps.llm_config import openai_model
+        self.name = openai_model("rag", DEFAULT_MODEL)
         if not self.name:
             raise RAGProviderError("RAG generation is not configured.")
         if client is not None:
@@ -269,7 +270,13 @@ def get_client():
     if backend == "fake":
         return FakeRAGLLM()
     if backend == "gemini":
-        return GeminiRAGLLM()
+        from apps.llm_config import fallback_enabled, require_openai_key
+        from apps.llm_fallback import FallbackClient
+        primary = GeminiRAGLLM()
+        if not fallback_enabled():
+            return primary
+        require_openai_key()
+        return FallbackClient(primary, OpenAIRAGLLM, feature="pandu")
     if backend == "openai":
         return OpenAIRAGLLM()
     raise RAGProviderError("RAG generation is not configured.")

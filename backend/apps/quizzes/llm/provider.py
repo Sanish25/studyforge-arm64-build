@@ -55,7 +55,8 @@ class OpenAIQuizLLM:
         if not key:
             raise LLMError("OPENAI_API_KEY is not set")
 
-        self.name = os.environ.get("QUIZ_LLM_MODEL", DEFAULT_MODEL)
+        from apps.llm_config import openai_model
+        self.name = openai_model("quiz", DEFAULT_MODEL)
         # Quizzes have a 15-second target (SCRUM-27), so fail faster than the
         # study guide does. max_retries handles transient 429s and 5xx.
         self._client = OpenAI(api_key=key, timeout=30.0, max_retries=1)

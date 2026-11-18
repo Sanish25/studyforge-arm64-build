@@ -35,9 +35,16 @@ def get_client():
         return FakeStudyGuideLLM()
 
     if backend == "gemini":
+        from apps.llm_config import fallback_enabled, require_openai_key
         from apps.notes.llm.gemini import GeminiStudyGuideLLM
+        from apps.notes.llm.provider import OpenAIStudyGuideLLM
+        from apps.llm_fallback import FallbackClient
 
-        return GeminiStudyGuideLLM()
+        primary = GeminiStudyGuideLLM()
+        if not fallback_enabled():
+            return primary
+        require_openai_key()
+        return FallbackClient(primary, OpenAIStudyGuideLLM, feature="notes")
 
     if backend == "openai":
         from apps.notes.llm.provider import OpenAIStudyGuideLLM
