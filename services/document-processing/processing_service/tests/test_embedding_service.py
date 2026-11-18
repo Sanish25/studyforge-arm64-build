@@ -85,8 +85,25 @@ class EmbeddingServiceTests(SimpleTestCase):
             )
         )
         with patch("processing_service.embedding_service.genai.Client", return_value=client):
-            with self.assertRaises(RetryableProcessingError):
+            with self.assertRaises(RetryableProcessingError) as caught:
                 embed_texts(["chunk"])
+        self.assertNotIn("slow down", str(caught.exception))
+        self.assertIsNone(caught.exception.__cause__)
+
+    def test_provider_error_does_not_expose_or_chain_request_details(self):
+        secret_marker = "PRIVATE_DOCUMENT_MARKER_62d1b9"
+        client = SimpleNamespace(
+            models=SimpleNamespace(
+                embed_content=Mock(
+                    side_effect=ClientError(400, {"error": {"message": secret_marker}})
+                )
+            )
+        )
+        with patch("processing_service.embedding_service.genai.Client", return_value=client):
+            with self.assertRaises(PermanentProcessingError) as caught:
+                embed_texts([secret_marker])
+        self.assertNotIn(secret_marker, str(caught.exception))
+        self.assertIsNone(caught.exception.__cause__)
 
     def test_server_error_is_retryable(self):
         client = SimpleNamespace(

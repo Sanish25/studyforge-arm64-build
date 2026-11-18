@@ -43,8 +43,12 @@ def extract_document(content: bytes, mime_type: str) -> DocumentExtraction:
             return _extract_docx(content)
         if mime_type == PPTX_MIME:
             return _extract_pptx(content)
-    except Exception as exc:
-        raise PermanentProcessingError("Could not extract text from the Office document.") from exc
+    except Exception:
+        # Parser exceptions can include snippets or details derived from the
+        # submitted document. Do not expose the chained exception to Celery.
+        raise PermanentProcessingError(
+            "Could not extract text from the Office document."
+        ) from None
     raise PermanentProcessingError("Unsupported source MIME type.")
 
 
