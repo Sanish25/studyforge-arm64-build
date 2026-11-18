@@ -1294,35 +1294,32 @@ returned: “Your session is no longer valid and cannot be refreshed. Please use
 identity validation therefore remain incomplete; this is an expired session,
 not an observed IAM permission denial.
 
-The user must complete browser sign-in (and any required MFA) to renew the
-session while reusing the existing key pair. The CLI command is:
-
-~~~sh
-oci session authenticate --region us-phoenix-1 \
-  --profile-name studyforge-scrum122 \
-  --public-key-file-path "$HOME/.oci/sessions/studyforge-scrum122/oci_api_key_public.pem"
-~~~
-
-The public key path exists and matches the configured private key. After the
-interactive browser step, validate with
-`oci session validate --profile studyforge-scrum122 --auth security_token`,
-then repeat the minimal read-only identity lookup before inventory. No IAM
-permissions were changed or escalated.
+On November 18, the session was renewed by Oracle browser sign-in
+using the existing key pair. The installed CLI 3.96.2 uses the supplied
+public-key flag only in its non-browser path. Its standard browser path
+generates a key and rewrites the profile, so the browser helper was invoked
+with the existing key in memory and a loopback-only callback. The configured
+public key and fingerprint matched before login. After login, the session
+principal and tenancy matched the profile and signed read-only `GetUser`
+and `GetTenancy` succeeded. Only the expired token was replaced. The existing
+key files and profile configuration were preserved. The CLI reported a valid
+session through November 18, 2026 at 11:31:47 a.m. Central.
 
 ### OCI inventory and exposure status
 
-OCI inventory could not be refreshed because authentication expired. There is
-no new evidence for resource compartments, the VM VNIC and IPv6 state, current
-OKE node-pool health, current
-security-list/NSG unions, current routes, OCIR repository metadata, or object
-storage metadata. The confirmed prior inventory remains historical: the API
-VM had private address `10.0.0.234` on `10.0.0.0/24`, OKE was
-`OCI_VCN_IP_NATIVE` with pod subnet `10.0.1.0/24`, one active ARM64 node was
-observed, and the VCN was `10.0.0.0/16`. A previous pod connection to the VM on
-5432 and 6379 failed. The prior subnet security-list evidence allowed public
-22/80/443 and had no 5432/6379 rule; this was not a refreshed effective-rule
-union and did not establish IPv6 behavior. Do not treat the previous node or
-cluster status as current.
+**Refreshed read-only on 2026-11-18 in `us-phoenix-1`.** The VM, cluster,
+node pool, VCN, and OCIR repository are in the root compartment
+`dhitalaashish20`. The authorized principal's accessible compartment listing
+returned no active child compartments.
+
+| Resource | Verified OCI state |
+|---|---|
+| API VM and VNIC | `studyforge-api` RUNNING. One VNIC on `10.0.0.0/24`, private IPv4 `10.0.0.234`, public IPv4 `132.226.88.147`, no secondary IPv4, IPv6 address, or attached NSG. |
+| API routes and security list | The default public route points to an enabled Internet Gateway. The VNIC uses its subnet route table, with no private-IP route override. The subnet's sole security list allows public IPv4 TCP 22, 80 and 443, plus ICMP, with stateful unrestricted IPv4 egress. It has no TCP ingress to 5432, 6379 or 6380 from any source. |
+| OKE | `studyforge-oke` ACTIVE, Kubernetes `v1.35.2`, private API `10.0.1.9:6443`. `studyforge-arm-workers` ACTIVE with one A1 Flex node at `10.0.1.63` and an Oracle Linux aarch64 image. Kubernetes readiness was not re-probed. |
+| Worker and pod networking | Both use private subnet `10.0.1.0/24`, OCI VCN-native pod networking and no public or IPv6 addresses. The primary VNIC uses `studyforge-oke-workers-nsg`. The secondary pod VNIC at `10.0.1.172` uses `studyforge-oke-pods-nsg` and has the previously observed frontend pod address `10.0.1.32` allocated. Endpoint, worker and pod NSG membership and rules were read. This verifies the expected pod NSG source; actual packets from a future worker remain unobserved. |
+| Pod effective egress and routes | The private subnet security list permits stateful unrestricted IPv4 egress, so the pod NSG does not need an extra egress rule to reach the future VM listener. The private subnet uses NAT for default IPv4 egress and a service gateway for Oracle services. No VNIC or private-IP route override or VCN/subnet IPv6 prefix was found. |
+| Registry and storage | The only OCIR repository in the verified scope is private `studyforge/frontend` with one image. `studyforge/document-processing` is absent. Object Storage namespace `axcyydnoof5f` returned zero buckets, and Vault returned zero secret metadata entries in the accessible scope. This does not establish the absence of an external approved store. |
 
 Exposure is separated into the following evidence:
 
@@ -1331,33 +1328,35 @@ Exposure is separated into the following evidence:
 | Service binding | PostgreSQL listened on `0.0.0.0:5432` and IPv6 wildcard; Redis listened on `0.0.0.0:6379` and IPv6 wildcard. | Both were wildcard-bound. |
 | Docker publication | Compose published host ports 5432 and 6379 on IPv4 and IPv6 wildcards. | Both were externally addressable at the Docker host-port layer. |
 | Host firewall | IPv4 INPUT allowed 22/80/443 and rejected other inbound traffic; Docker DNAT traversed FORWARD. `DOCKER-USER` was empty and Docker accepted the container destinations. | INPUT policy alone does not block these forwarded ports; effective host forwarding protection was not present in the captured rules. IPv6 forwarding policy was not confirmed. |
-| OCI network permission | The prior subnet security list had no public 5432/6379 rule, but the current union of all NSGs/security lists and IPv6 rules is unknown. | Prior evidence did not show a public OCI allow; current effective permission is unverified. |
-| External reachability | No controlled public IPv4/IPv6 connection test was recorded. | Public reachability is not verified. Wildcard binding and Docker publication are a potential exposure finding, not proof of Internet reachability. |
+| OCI network permission | The current API VNIC has no attached NSGs. Its only subnet security list contains no TCP ingress for 5432, 6379 or 6380. The API VNIC has public IPv4 and no assigned IPv6. | The verified direct OCI network path does not permit these ports from any source. No public rule removal is required by this snapshot. |
+| External reachability | No controlled public IPv4/IPv6 connection test was performed. Host firewall and Docker evidence is from the prior VM inspection. | The OCI policy denies direct ingress. Public reachability was not measured. Wildcard Docker publishes remain a host hardening concern. |
 
-Keep this as a separate security finding until the OCI rule union and host
-forwarding behavior are refreshed. If a fresh rule permits public database or
-broker traffic, propose the smallest immediate containment: remove only that
-public ingress rule after recording its exact resource and dependencies, while
+Keep the wildcard publication as a separate host-security finding. Recheck
+the OCI rules and host forwarding immediately before any approved change.
+If the rules later allow public database or broker traffic, propose removing
+only that public ingress rule after recording its resource and dependencies, while
 keeping SSH/HTTP/HTTPS and all existing NSG memberships intact. Do not execute
 that change without a separate approval. Regardless, the target design must
 bind PostgreSQL only to loopback and the VM private IPv4 address, and Redis
 TLS only to the VM private IPv4 address; do not publish either service on a
 wildcard or IPv6 address.
 
-The previous `OCI_VCN_IP_NATIVE` evidence makes the worker pod's VCN address
-and `studyforge-oke-pods-nsg` the leading source candidates. They are not yet
-confirmed for the actual worker. Refresh pod subnet, pod/node VNIC and NSG
-membership, routes, and observed connection source before selecting a rule.
-If the pod NSG is confirmed, the narrow proposal is: add a dedicated NSG to the
-API VNIC with stateful ingress TCP 5432 and 6380 only from that source NSG; add
-matching OKE pod NSG egress only to the API NSG on those ports if current
-effective egress requires it; and add a Docker `DOCKER-USER` allow for the
-verified source followed by a deny for other remote traffic to those original
-destinations. Bind 5432 and Redis TLS 6380 to `10.0.0.234`; keep legacy Redis
-6379 loopback-only during an approved transition, then remove it after all
-clients use TLS. Preserve established and loopback flows. Add no public or
-IPv6 database/broker rule. This proposal depends on confirming the exact pod
-source, VNIC membership, route and Docker rule ordering.
+The verified OCI minimum is one new `studyforge-api-processing-ingress-nsg`
+on the API VNIC, with two stateful TCP ingress rules from the existing
+`studyforge-oke-pods-nsg` for PostgreSQL 5432 and proposed Redis TLS 6380.
+The [revised network proposal](#revised-network-proposal) records the exact
+VCN, target VNIC and source NSG IDs. Existing pod egress already permits the
+path. Before opening it, validate TLS and credentials, restrict the service
+publishes and Docker forwarding, and confirm the actual pod connection source
+with an authorized probe. Rollback detaches and removes only the new NSG
+after checking VNIC membership. Keep public and IPv6 ingress closed.
+
+The smallest proposed VM change remains restricting
+`/home/ubuntu/studyforge/.env` from observed 0664 to 0600 after confirming
+that the Compose operator is `ubuntu` and that no authorized group needs
+read access. Recheck current file metadata, validate quiet Compose config
+access, and record the previous owner and mode. This requires separate
+host/security approval. It is independent of the worker rollout.
 
 No database/broker TLS, authentication, role, storage, OCI, firewall, route,
 Kubernetes, or production service setting was changed.
@@ -1458,30 +1457,22 @@ approval, migration plan and full backend regression on a protected copy. The
 processing database's two migrations remain separately owned by the worker
 service release.
 
-### Current readiness and proposed commit grouping
+### Current readiness after local preservation and OCI renewal
 
-No commit was created. The local uncommitted runbook work is preserved and
-expanded; all code, test and workflow changes remain uncommitted for review.
-The candidate worktree does not authorize publication or deployment. The
-profile identity fields are repaired, but the user must complete the browser
-session renewal above before read-only OCI authentication and inventory can
-continue.
+The ten changes are preserved in four local commits on the official feature
+branch. The four earlier commits are still reachable.
 
-For later review, keep these as separate logical commits:
+| Local commit | Scope |
+|---|---|
+| `3d03a4fbecaed16c3e122f39afec8e25e0b65b57` | Worker logging and exception hardening plus tests |
+| `98fcdca6008a080386064bfa273edcebdc298196` | Native ARM64 workflow digest verification |
+| `add37bae4c877ac990a2f1dc1bf9dd4e69ea3c86` | Deployment preflight and readiness evidence |
+| `edd6d4d220eb74364dd9c243875f7a4410f0f72c` | SCRUM-130 Gemini-only factory test isolation |
 
-1. **SCRUM-122 worker logging hardening:** `tasks.py`,
-   `embedding_service.py`, `document_parser.py`, `pdf_parser.py`,
-   `processing_service/tests/test_tasks.py`,
-   `processing_service/tests/test_embedding_service.py`, and
-   `executions/tests.py`.
-2. **SCRUM-122 ARM64 publication and deployment record:**
-   `.github/workflows/processing-arm64.yml` and this runbook.
-3. **SCRUM-130 test isolation:** `backend/tests/test_gemini.py`, kept separate
-   for its owner’s review and later integration.
-
-Current recommendation remains **NO-GO for all production mutations**. Fresh
-OCI/network inventory, TLS and ACL design, storage/identity availability,
-approved secret delivery, API release choice, protected backups, and change
-owners are unresolved. Local code/workflow changes are for human review only.
-No production file, service, database, firewall, OCI resource, credential,
-image, Git remote, or Kubernetes resource was changed.
+The refreshed OCI inventory resolves the prior effective-rule uncertainty.
+Production remains **NO-GO**. The VM-side TLS and ACL setup, processing
+database and migrations, private bucket and scoped identities, approved secret
+and CA delivery, reviewed Django release and migration plan, protected
+backups, and assigned owners and maintenance window still require approval
+or verification. Git pushes, OCIR repository creation and publish, OKE
+resources, and real document acceptance require separate approvals.
