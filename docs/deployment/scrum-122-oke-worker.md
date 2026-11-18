@@ -1,11 +1,71 @@
 # SCRUM-122: OKE document-processing worker
 
-**Resumed on 2026-11-17 after the SCRUM-130 implementation.** Read-only OKE
-verification succeeded through the approved replacement session. The local
-ARM64 candidate and updated deployment draft passed validation. VM service
-transport and credential evidence remain the critical path. SCRUM-122 is
-complete after a real document is processed by the OKE worker and the result
-appears in StudyForge.
+**Status on 2026-11-17.** Authorized VM access is verified, and the official
+SCRUM-122 feature branch is the local source of truth. Live service inspection
+confirmed that the Django API, PostgreSQL, Redis, and storage need a coordinated
+cutover before the worker can run. SCRUM-122 is complete after a real document
+is processed by the OKE worker and the result appears in StudyForge.
+
+## Verified production baseline after SSH authorization
+
+Aashish Dhital authorized the dedicated local key
+`~/.ssh/studyforge-api-vm`. The connection verified the pinned Ed25519 host
+fingerprint `SHA256:+ba6rJO8D/Xlt7YGyYJyLaZbZjqIJ/s3iA8YkdxYVv4` using strict
+checking. It authenticated as `ubuntu` to `studyforge-api` at public IP
+`132.226.88.147`. Interface `enp0s6` reports `10.0.0.234/24` and the host
+has no global IPv6 address. `sudo -n -l` confirmed `(ALL) NOPASSWD: ALL`.
+All VM commands in this checkpoint were read-only. Config values were
+classified in memory and no credential values were displayed.
+
+| Area | Verified live evidence | Required before OKE worker rollout |
+|---|---|---|
+| Docker and host firewall | Compose project `studyforge` runs `studyforge-db-1` and `studyforge-redis-1`. Both ports 5432/6379 are published on IPv4 and IPv6 wildcards. IPv4 INPUT allows 22/80/443 and rejects other traffic, but Docker DNAT sends the two ports through FORWARD. `DOCKER-USER` is empty and the Docker chain accepts both container destinations. `netfilter-persistent` is active. | Replace wildcard mappings with scoped bindings and add an ingress guard in the Docker forwarding path before authorizing OCI ingress. A host INPUT rule alone does not secure the published container ports. |
+| PostgreSQL 16.16 | `ssl=off`, `listen_addresses=*`, port 5432. HBA trusts local sockets/loopback and uses SCRAM for other hosts. A read-only TCP query inside Docker authenticated with the existing container configuration and reported no TLS. Application DB `studyforge` has pgvector and its login is a superuser. The processing DB and role `studyforge_processing` are absent. | Enable verified TLS, scope remote HBA, provision the dedicated restricted processing database and role, then apply and verify the two processing migrations. Keep the existing application database and role out of the worker Secret. |
+| Redis 7.4.12 | Port 6379, `tls-port=0`, `protected-mode=no`, ACL default user `on nopass` and no other user. The running build links TLS libraries. Persistence uses RDB snapshots with AOF disabled, and changes since the last snapshot were observed. Django uses unauthenticated loopback `redis://` on database 0. | Configure an authenticated native TLS listener for the same broker and database index. Preserve its current data volume and verify persistence before any Redis restart. Migrate all producers and consumers before removing the old path. |
+| Django and Celery deployment | Gunicorn was active as `ubuntu` from `/home/ubuntu/studyforge/backend`. The clean disk checkout is `6c3922fac11f063b1cda14e2d685757c6c262345` on `deploy/SCRUM-125-backend-postgres-redis`. This checkout lacks SCRUM-127 settings and the S3 job locator. `studyforge-celery.service` is active with `-A config` and no explicit queue flag. Snapshot counts for `document-processing`, `celery`, and Kombu's `unacked` hash were zero. | Approve and stage a current Django API release. Confirm the legacy service's full responsibilities and drain/recheck work at cutover. Retire only the obsolete consumer after the new route is ready. A zero snapshot is not proof that a later cutover is idle. |
+| HTTPS, callback and auth | Nginx serves `studyforge-rodians.duckdns.org` with a Let's Encrypt certificate matching that DNS name. HTTPS returned 200 for liveness and 404 for readiness and the job locator. The legacy callback route returned 405 for GET, consistent with its POST contract. The loaded Gunicorn env lacks `PROCESSING_SERVICE_TOKEN`. | Update the API to provide readiness and the job locator, then supply a matching token to Django and worker. Prove the authorized GET locator and POST callback through a controlled fixture or approved end-to-end job. |
+| Source storage | Deployed settings use filesystem storage. No `DOCUMENT_STORAGE_*` settings or cloud workload identity were loaded. The default media directory was absent and a read-only query found zero document rows and no file references at the snapshot. | Select an approved private S3-compatible bucket, endpoint, region, and separate Django and worker identities. Recheck uploads and references when writes are paused. If documents appear, back up existing media and verify a SHA-256 copy before switching storage. |
+| Certificates and credentials | The working HTTPS certificate covers Django only. PostgreSQL and Redis have no active TLS configuration or demonstrated CA for worker traffic. Gunicorn and legacy Celery use `/etc/studyforge.env` (root:ubuntu, 0640). It declares a Gemini key and existing Django DB settings. The dedicated processing env file is absent. The Compose `/home/ubuntu/studyforge/.env` is currently 0664 and declares the existing PostgreSQL password. | Approve endpoint names and CA trust, the credential store and delivery method, and Gemini reuse if its scope is suitable. Create separate worker DB, Redis, Django secret, shared service token, and scoped object-storage credentials or identity. Include restricted permissions for the Compose env file in the host change and evaluate any rotation separately. Verify Compose still reads its settings as the authorized user and record pre-change ownership/mode for rollback while keeping credential access restricted. |
+
+The old OCI inventory showed no processing OCIR repository and no suitable
+Vault entry. The local OCI security token is expired. Reauthenticate and
+refresh inventory before proposing any storage or registry resource creation.
+The last verified OKE state had one Ready ARM64 node and the frontend only.
+
+## Proposed production approval checkpoints
+
+The candidate preserves both existing data stores. Database port
+`5432` and Redis TLS port `6380` are proposed targets. The latter has no
+active listener in the verified snapshot. Confirm a maintenance window,
+approved CA and secret store, concrete certificate SANs and the approved
+bucket/identities before executing any service configuration.
+
+| Checkpoint | Proposed change and impact | Validation and rollback |
+|---|---|---|
+| Private bindings and host firewall | On `studyforge-api` retain the verified local address for Django. Bind PostgreSQL's private 5432 and Redis's private TLS 6380 to `10.0.0.234` and remove wildcard publishes. During transition keep legacy Redis 6379 loopback-only if needed. In IPv4 `DOCKER-USER` match ingress on `enp0s6` and original destination `10.0.0.234` and published ports after DNAT. Permit the verified pod subnet with source match `-s 10.0.1.0/24`, reject other ingress to those ports, and preserve existing established and local flows. Use Docker-aware persistence with ordering and leave IPv6 service publishes off. Container replacement can briefly interrupt clients. | Review effective NAT and filter order, verify bindings and tests from permitted and denied sources, and prove persistence after an approved controlled restart. On failure keep OCI ingress closed, remove only the new policy and restore the recorded Compose and firewall configuration. [Docker iptables and original destination matching](https://docs.docker.com/engine/network/firewall-iptables/) |
+| PostgreSQL TLS, role and migrations | Use native TLS on the existing PostgreSQL instance, with a privately routed certificate name and approved CA. Ahead of the broad HBA entry, allow `hostssl` SCRAM only for `studyforge_processing` DB/role from the verified worker source, and reject other or plaintext pod connections. Keep Django on its existing database and test its TLS client configuration before enabling secure mode. Create `studyforge_processing` with a restricted runtime login and apply `executions.0001_initial` and `0002_callback_delivery` under a separately approved migration identity or explicit owner workflow. The app may briefly reconnect on a DB restart. | Verify `verify-full`, `pg_stat_ssl`, `SELECT 1`, HBA order, runtime privileges, application DB isolation and both migration records. If cutover fails, close new ingress, restore HBA/TLS/Compose and Django config, and preserve both databases. Revoke newly issued access if necessary. Database deletion or a restore requires a separate decision. [PostgreSQL HBA rule order](https://www.postgresql.org/docs/16/auth-pg-hba-conf.html) |
+| Redis TLS, auth and queue | Use the running broker with native TLS on proposed port 6380, approved server cert/CA, and separate authenticated Django producer and worker ACL accounts tested for their Celery command/key/channel needs. Keep DB 0 and the same `document-processing` queue. Stage any client-auth certificate requirement if mandated by the approved policy. Migrate clients before removing anonymous access and closing plaintext 6379. Keep the existing Redis volume attached, confirm a fresh durable backup, and drain or record in-flight jobs. Changes to ACLs are shared across both listeners and a restart can affect uploads and pending tasks. | Validate correct hostname and CA, authenticated `PING`, rejected anonymous/invalid trust, and Celery publish, delivery, retry and ack in staging. During a rollback close new ingress first, restore Redis listener/ACL and Django broker settings together, recheck queue state, and keep existing volume/data. Never flush or blindly replay jobs. [Redis TLS](https://redis.io/docs/latest/operate/oss_and_stack/management/security/encryption/) |
+| Django, storage and callback | Separately approve the backend upgrade from the verified VM baseline to a tested revision containing SCRUM-127, a private encrypted S3-compatible bucket with distinct Django write and worker read identities, and the shared service token. Set Django S3, `POSTGRES_SSLMODE=verify-full` with CA and a named authenticated `rediss://` broker, then enable the secure-connections flag. The current branch also includes SCRUM-130. Set `AI_FALLBACK_ENABLED=0` during this separate API release unless fallback and its credentials are approved. Pause writes for a final copy/diff if media appears. Drain and disable the legacy consumer only after its scope and outstanding jobs are accounted for. Expect a brief API/upload maintenance window. | Stage on a protected clone. Recheck the migration plan and fresh backups, run checks, validate readiness, existing file access, authenticated locator and callback, and verify the worker can read and hash an approved object. Restore the known-good release, settings, and service states if needed. Reconcile writes made during any approved storage cutover before returning traffic. Preserve objects, media, migration state and broker data. [SCRUM-127 storage cutover](production-document-storage.md) |
+| OCI ingress | After VM-side TLS/auth and forwarding controls pass, create `studyforge-api-processing-ingress-nsg` on the existing API VNIC. Add only stateful TCP ingress from `studyforge-oke-pods-nsg` to the verified TLS ports (proposed 5432/6380). The pod subnet already permits egress. Existing public and frontend access should be unaffected. | From an authorized OKE probe verify authenticated DB/Redis TLS, CA/name checking and absence of public access. Capture the exact NSG before/after state. Rollback detaches only the new NSG and removes its rules/resources, preserving other VNIC groups. See the [revised network proposal](#revised-network-proposal) for VCN and VNIC IDs. |
+| Registry and Git | Obtain separate approval to push the reviewed official feature commit to Bitbucket and mirror the exact same ref/SHA to `Sanish25/studyforge-arm64-build`. If absent, create private OCIR repository `studyforge/document-processing`. After publication approval dispatch the reviewed workflow on the official ref, verify unique tag, `linux/arm64` and recorded digest. No VM impact. | Compare both refs and verify the built and pulled digest. On failure, leave deployment pinned to its previous image state. Record the failed tag/digest and handle any remote ref or registry cleanup as a separate change. |
+| Kubernetes and application check | Create the approved worker ConfigMaps, CA trust, Secret and ServiceAccount in `studyforge`. Use the approved digest and existing pull Secret. Verify dependencies with the exact image before starting one ARM64 worker on `document-processing`. Once explicitly approved, submit one non-sensitive document through Django. The worker does not need a Service, Ingress or frontend change. | Verify the pod Ready, hostname/architecture and image ID, task receipt by OKE, persisted execution, callback status and final application result. Rollback stops the worker and removes only its newly introduced workload and configuration while preserving the existing frontend and all data. |
+
+The application migration snapshot compared with `ee4c054` indicates
+`conversations.0002_conversation_message` and `0003_message_tool_trace`,
+`notes.0003_note_options_and_sources`, and
+`quizzes.0004_survival_sessions` are pending. Verify `migrate --plan` on
+the recovered staging database before approving application migrations.
+
+### Credential and certificate handoff
+
+| Input | Source for the approved rollout |
+|---|---|
+| `PROCESSING_DB_PASSWORD` | New scoped processing login credential in the approved store. Existing Django DB credentials are for the current application role. |
+| `PROCESSING_REDIS_URL` | New named worker ACL credential in the approved store. Use `rediss://` with `ssl_cert_reqs=required` and the verified host/DB 0. Give Django its own producer credential. |
+| `PROCESSING_SECRET_KEY` and `PROCESSING_SERVICE_TOKEN` | Approved new, distinct secrets. Share only the service token between Django and worker through the store. |
+| `GEMINI_API_KEY` | Existing Gunicorn setting is present in `/etc/studyforge.env`. Confirm approved reuse and embedding scope, or issue a separate scoped key. |
+| S3 access | Use separate approved identities for Django and worker through the provider's secret or workload identity mechanism. Worker needs `HeadBucket` and scoped `GetObject`, plus any required decryption access. If no approved bucket exists, choose a private S3-compatible provider and scope before creating anything. [OCI S3 compatibility](https://docs.oracle.com/en-us/iaas/Content/Object/Tasks/s3compatibleapi.htm) |
+| TLS trust | Approve the private endpoint names/SANs and CA first. Only public CA chains enter the trust ConfigMap. Service private keys remain on the VM or in the authorized key store. Django HTTPS already has public trust. |
 
 ## Replacement session and live evidence (2026-11-17)
 
@@ -67,14 +127,16 @@ standalone Django settings module for probes, reuses the service's readiness
 check for DB, Redis and bucket access, and keeps one worker replica, the
 existing queue, the 150-second termination grace and the private Django
 HTTPS route. The draft intentionally has an unresolved image digest and
-requires the separately supplied runtime and trust ConfigMaps. Select the
-`development` worker source described below for the release build because
-the saved SCRUM-122 branch predates the code that implements these settings.
+requires the separately supplied runtime and trust ConfigMaps. The official
+feature branch includes the SCRUM-127 worker source after consolidation.
+The command checks the named Redis credential and dependency readiness
+before starting Celery. It replaces the shell with Celery as PID 1 after
+the check succeeds.
 
 | Source | Required data and conditional dependencies |
 |---|---|
-| Checked-in ConfigMap `studyforge-processing-worker` | `DJANGO_SETTINGS_MODULE=processing_service.settings`, `PROCESSING_SOURCE_MODE=s3`, `PROCESSING_REQUIRE_DIRECT_STORAGE=1`, `STUDYFORGE_REQUIRE_SECURE_CONNECTIONS=1`, `PROCESSING_DB_SSLMODE=verify-full`, `PROCESSING_DB_SSLROOTCERT=/etc/studyforge/trust/postgres-ca.pem`. Includes current port 5432 and the pod-verified Django HTTPS base URL. Retains application defaults for allowed hosts, visibility timeout, Gemini embedding model, 768 dimensions and batch size. Disables AWS EC2 metadata credential lookup. |
-| Runtime ConfigMap `studyforge-processing-runtime` | Confirm `PROCESSING_DB_HOST` as the privately routed certificate name (or verified IP SAN), `PROCESSING_DB_NAME` and `PROCESSING_DB_USER`, and the actual `PROCESSING_STORAGE_BUCKET` and `PROCESSING_STORAGE_REGION`. Provide `PROCESSING_STORAGE_ENDPOINT_URL` for a custom HTTPS endpoint, `PROCESSING_STORAGE_ADDRESSING_STYLE` if it differs from defaults, and `PROCESSING_STORAGE_CA_BUNDLE` as a mounted path if the endpoint uses a private CA. Storage connect/read timeouts default to 3/10 seconds. Confirm the live TLS port before filling the final manifest. |
+| Checked-in ConfigMap `studyforge-processing-worker` | `DJANGO_SETTINGS_MODULE=processing_service.settings`, `PROCESSING_SOURCE_MODE=s3`, `PROCESSING_REQUIRE_DIRECT_STORAGE=1`, `STUDYFORGE_REQUIRE_SECURE_CONNECTIONS=1`, `PROCESSING_DB_SSLMODE=verify-full`, `PROCESSING_DB_SSLROOTCERT=/etc/studyforge/trust/postgres-ca.pem` and the pod-verified Django HTTPS base URL. Retains application defaults for allowed hosts, visibility timeout, Gemini embedding model, 768 dimensions and batch size. Disables AWS EC2 metadata credential lookup. |
+| Runtime ConfigMap `studyforge-processing-runtime` | Supply the verified TLS settings `PROCESSING_DB_HOST` and `PROCESSING_DB_PORT`, `PROCESSING_DB_NAME` and `PROCESSING_DB_USER`, and the actual `PROCESSING_STORAGE_BUCKET` and `PROCESSING_STORAGE_REGION`. Provide `PROCESSING_STORAGE_ENDPOINT_URL` for a custom HTTPS endpoint, `PROCESSING_STORAGE_ADDRESSING_STYLE` if it differs from defaults, and `PROCESSING_STORAGE_CA_BUNDLE` as a mounted path if the endpoint uses a private CA. Storage connect/read timeouts default to 3/10 seconds. |
 | Secret `studyforge-processing-secrets` | `PROCESSING_SECRET_KEY`, scoped `PROCESSING_DB_PASSWORD`, authenticated `PROCESSING_REDIS_URL` using `rediss://` with `ssl_cert_reqs=required` and the certificate's endpoint name, matching Django `PROCESSING_SERVICE_TOKEN`, and authorized `GEMINI_API_KEY`. Inject the storage access key ID and secret access key together if that is the approved identity, plus `PROCESSING_STORAGE_SESSION_TOKEN` if credentials are temporary. An alternative workload identity needs a verified provider and an explicit credential projection. Service account token automount is disabled. |
 | Trust ConfigMap `studyforge-processing-trust` | Verified public CA certificates only. Supply `postgres-ca.pem`, an optional Redis CA file referenced by the URL's `ssl_ca_certs` parameter, and an optional S3 CA file referenced by `PROCESSING_STORAGE_CA_BUNDLE`. The pinned Redis client uses hostname verification by default. If a service needs client certificates, handle the client private keys through a separately approved secret mount and review the required application settings. |
 | Existing Secret `ocir-pull-secret` | Confirmed type `kubernetes.io/dockerconfigjson` and key `.dockerconfigjson`. Actual pull of the exact approved digest will verify its repository access. |
@@ -93,16 +155,15 @@ candidate, with networking disabled and disposable settings. It passed on
 healthy mocked dependencies and returned failure for each independent DB,
 Redis, and bucket outage. `actionlint` passed. Before applying the worker,
 verify its dependency path using the exact image and authorized credentials.
-Kubernetes pod readiness by itself does not stop a Celery process from
-consuming the broker queue.
+The dependency gate blocks the initial subscription. After startup a
+readiness failure does not itself pause a running Celery consumer.
 
-## SCRUM-127 production compatibility matrix (2026-11-17)
+## SCRUM-127 compatibility matrix before VM access (2026-11-17)
 
 The requirements come from `development` commit `c9c8936` and its
 [SCRUM-127 production runbook](https://bitbucket.org/mth115_super/studyforge/src/c9c8936b9df01cdc9179d8da63d61f871ad00bec/docs/deployment/production-document-storage.md).
-Production observations are from the OKE pod and VM checks recorded above.
-The loopback tests cover only their tested listeners. A distinct authenticated
-TLS endpoint on the private interface still needs operator confirmation.
+This records the pre-SSH evidence. The verified live baseline above
+supersedes the earlier unknowns about the inspected services.
 
 | Dependency | Required for the OKE worker | Verified production evidence | Compatibility and proof needed |
 |---|---|---|---|
@@ -122,24 +183,17 @@ check tested URL parsing only.
 
 ## Authorized VM access and credential sources
 
-There is no verified SSH or administrator session for this workspace.
-The SCRUM-125 runbook documents SSH as `ubuntu` using an existing approved
-identity. Aashish Dhital is the historical deployment contact. The current
-operator and access assignment are unconfirmed. The local SSH agent listed
-zero identities. The expected SSH client config, libpq service and password
-files, and project environment files were absent. The Bitbucket pipeline
-runs tests and the deployment SSH flow is manual. The earlier OCI inventory
-found no existing console connection or suitable Vault secret.
+The dedicated SSH key and administrative access are verified as recorded
+above. Use `ubuntu@132.226.88.147` with `~/.ssh/studyforge-api-vm`, identity
+agent and password authentication disabled, and strict verification against
+the pinned host key. Aashish Dhital authorized this access. The earlier
+OCI inventory found no existing console connection or suitable Vault secret.
 
 The root-owned VM file `/etc/studyforge.env` is the documented source for
 Django's settings. The `ocarun` agent cannot read it. The operator should
 compare the broker configuration, S3 settings, and service-token match in
-place and report redacted results. Confirm the approved source for the
-worker DB and Redis credentials, worker secret key, matching service token,
-Gemini key and scoped storage identity. Hand off CA certificates with endpoint
-names and fingerprints. Keep server private keys and credential values in
-their approved stores. Use the [operator request](#consolidated-vm-operator-request)
-for a single handoff. No recovery or privilege escalation was attempted.
+place and report redacted results. Confirm the approved sources for the new
+worker credentials and CA certificates using the handoff table above.
 
 ## Contingency plan for secure VM endpoints
 
@@ -191,11 +245,11 @@ the current Django path until a coordinated cutover.
 This checkpoint updates the runbook only. Production ports, VM settings,
 registry and workloads remain at the observed baseline.
 
-## Consolidated VM operator request
+## Earlier operator handoff checklist
 
-Ask Aashish Dhital or the current `studyforge-api` operator to provide the
-following redacted findings or an existing authorized read-only path to
-collect them. Use the approved secret store or on-host handoff for values.
+The read-only SSH inspection above covers these original requests. Use this
+checklist to revalidate the live settings after approved changes. Use the
+approved secret store or on-host handoff for values.
 
 1. The deployed Django commit, whether the authenticated S3 job locator is
    served, and the configured storage mode, private bucket/region, HTTPS
@@ -224,21 +278,22 @@ and the production document test as explicit approval gates.
 
 ## Resume checkpoint
 
-Use `/Users/sanishshrestha/Documents/studyforge-scrum-122` on branch
-`chore/scrum-122-arm64-pipeline`. Its branch and commits are stored in the
-shared Git directory under `/Users/sanishshrestha/Documents/studyforge/.git`.
-The branch includes `8010e0e5a15148a99124a6c2cffcc2f487d3d450` (publication
-and manifest prep), `39f815dea94ff0cd81d821cdebb2b0ffc057bbde` (access audit),
-and pause commit `6c0666e57ec98c52a0ed66eca81da19c3384d39d`. Verify with
-`git rev-parse HEAD` and `git status --short --branch` in the durable worktree.
-The last verified GitHub branch tip was
-`27fc9479af1eb31a5e29ed54880948ae39bcc8e1`. This worktree move preserved Git
-metadata and left the main StudyForge checkout separate.
+Use `/Users/sanishshrestha/Documents/studyforge` on the official branch
+`feature/SCRUM-122-deploy-kubernetes-to-processing` for all new work.
+The official branch was fast-forwarded to `origin/development` at
+`ee4c054271abcb511d7863a92906efb04f79748a` before the five artifacts were
+consolidated. The original `chore/scrum-122-arm64-pipeline` worktree at
+`/Users/sanishshrestha/Documents/studyforge-scrum-122` is retained as a
+recovery reference at `bd7cb9cbebd790106913b967b1294de3724b45fe`.
+The five deployment files are in local consolidation commit
+`b62bcec14b4821bec0b2d451cebf8355d1c006ca`.
+The current Bitbucket pipeline was preserved. The Cloud Shell preflight is
+legacy and exits without contacting infrastructure. Use this runbook and
+the dedicated reconnect helper for current validation.
 
-**Next action.** Obtain the consolidated evidence above from the authorized
-VM operator and confirm the credential sources. Use the compatibility matrix
-to select existing endpoints or scope a separately approved TLS and auth
-change. Confirm the actual ports before finalizing the manifest and ingress.
+**Next action.** Confirm the approved CA, credential store, bucket/identities
+and maintenance window. Review the staged service/API cutover and backend
+regression failures before seeking production approval.
 
 ## SCRUM-130 review and worker integration
 
@@ -246,10 +301,10 @@ change. Confirm the actual ports before finalizing the manifest and ingress.
   `a7ffc4bb39bd237d97920fe899697df3abe94295`. The last implementation commit
   is `080b9eb6b6a82a75ee38d2e3093aa4b3464acfb8`. The completion report is
   `docs/ai-dev-reports/curiosity-report-Shrestha-SCRUM-130-2026-11-17.md` at the
-  branch tip. `git ls-remote` verified Bitbucket `development` at
-  `c9c8936b9df01cdc9179d8da63d61f871ad00bec` and `main` at
-  `b1d44bed0eedac243ea7119b07eceb734b362a5e`. Neither branch tip contains the
-  SCRUM-130 commits. The live Django revision is still unknown.
+  branch tip. The later Bitbucket audit verified squash merge
+  `ee4c054271abcb511d7863a92906efb04f79748a` on `development`
+  with the same tree as the feature tip. This is the parent of the official
+  consolidation. The deployed Django checkout still predates SCRUM-130.
 - SCRUM-130 changes Django notes, quizzes, and Pandu answer generation. Each
   request starts on Gemini and can invoke the OpenAI fallback once for a
   qualifying provider failure. The worker tree is identical between
@@ -264,13 +319,10 @@ change. Confirm the actual ports before finalizing the manifest and ingress.
   tests with `PYTHONPATH=backend python3 -m unittest discover -s backend/apps/tests -p 'test_scrum130_*.py' -v`.
   The tests use mocks and establish local behavior. Production fallback is
   unverified.
-- The saved SCRUM-122 branch forked before the current `development` worker
-  changes from SCRUM-127. Prepare the release candidate from the verified
-  `development` commit, carrying only the reviewed SCRUM-122 ARM64 workflow
-  and Kubernetes deployment assets as needed. Update the manifest for the
-  confirmed production contract, validate the candidate, and seek approval
-  for the exact remote update and publication. SCRUM-130 does not need to be
-  merged into the worker branch. Keep shared branches unchanged until approved.
+- The recovery branch predates SCRUM-127. The consolidated official branch
+  contains SCRUM-127 and SCRUM-130 via the fast-forward and adds only the
+  five reviewed deployment files. Worker code remains independent of the
+  Django OpenAI settings. Remote updates and publication remain approval gates.
 - The current `development` candidate passed
   `python3 services/document-processing/check.py` from a complete Git archive.
   Docker reported `linux/arm64`. Both workers registered the document task
@@ -306,7 +358,7 @@ describe the original Django-stream configuration.
   contract, record the exact gaps and obtain separate approval for the
   necessary backend, storage, TLS, or credential changes.
 
-## Resumed production evidence
+## Initial production evidence before SSH access
 
 - OCI browser authentication succeeded for `studyforge-scrum122-local`.
   `oci iam tenancy get` and `oci os ns get` confirmed the expected tenancy
@@ -373,7 +425,7 @@ both ports, and explicit network approval, create a dedicated
 `studyforge-api-processing-ingress-nsg` in `studyforge-vcn` with two
 stateful ingress rules. Use protocol `6`, `sourceType=NETWORK_SECURITY_GROUP`,
 the existing pod NSG OCID as `source`, and
-`tcpOptions.destinationPortRange` set to `5432..5432` and `6379..6379`
+`tcpOptions.destinationPortRange` proposed as `5432..5432` and `6380..6380`
 respectively. Apply using `oci network nsg rules add`, then attach only the new
 group to the API VNIC with `oci network vnic update --vnic-id ... --nsg-ids ...`
 using a fresh snapshot of current membership. The previously proposed
@@ -570,7 +622,7 @@ OCI session metadata supplied no independent host key for comparison.
 1. From the SCRUM-122 worktree, check the existing OCI profile:
 
 ```sh
-cd /Users/sanishshrestha/Documents/studyforge-scrum-122
+cd /Users/sanishshrestha/Documents/studyforge
 oci --profile studyforge-scrum122-local --auth security_token \
   --region us-phoenix-1 iam region list --output table
 ```
@@ -639,19 +691,21 @@ inventory before retrying creation.
 
 | Component | Current evidence | Status | Remaining work / proposed action | Approval required |
 |---|---|---|---|---|
-| Local OCI authentication | Browser session validated; Phoenix region list succeeded with `security_token` | VERIFIED | Refresh session when it expires | No |
+| Local source of truth | `/Users/sanishshrestha/Documents/studyforge` on `feature/SCRUM-122-deploy-kubernetes-to-processing`. See [Resume checkpoint](#resume-checkpoint) for the consolidation commit lookup. | VERIFIED | Request approval before pushing to Bitbucket or GitHub | Yes for remote writes |
+| Local OCI authentication | Browser session previously verified. Local validation now reports expired. | EXPIRED | Reauthenticate before OCI inventory or changes | No cloud change |
 | Private OKE connectivity | Approved replacement session and TLS-verified `kubectl get nodes` succeeded | VERIFIED | Reuse session while active | Yes, for a future session or allowlist change |
 | Kubernetes authorization | `get nodes`, namespace and RBAC checks succeeded | VERIFIED | None | No |
-| VM administration | VM RUNNING; Run Command plugin RUNNING; read-only command runs as `ocarun`; `sudo -n` requires a password | PARTIAL | Host firewall inspection or changes need legitimate sudo-capable access; no SSH key verified | Yes, for privileged access or access recovery |
+| VM administration | Dedicated SSH key verified for `ubuntu`, pinned host key matches, and `sudo -n -l` shows `NOPASSWD: ALL`. | VERIFIED | Use verified access for approved staged changes | Yes for production writes |
 | Registry availability | `studyforge/frontend` exists; processing repository and image absent | MISSING | Create private repository if still absent, then publish approved image | Yes |
-| ARM64 image | OKE node pool is A1 Flex / aarch64; local disposable image is linux/arm64 | PARTIAL | Publish the reviewed commit with unique tag and capture digest | Yes, remote push/publication |
-| PostgreSQL | OKE TCP probe failed. VM loopback 5432 declined TLS. | BLOCKED | Confirm private TLS endpoint, role and schema via authorized operator. Validate before approving ingress. | Yes for service changes or migration |
-| Redis | OKE TCP probe failed. VM loopback 6379 answered unauthenticated plaintext PING. | BLOCKED | Confirm authenticated private TLS endpoint and compare broker with Django. Validate before approving ingress. | Yes for service or credential changes |
-| Network security | VM ingress missing. The pod subnet security list already permits egress. Host firewall is unverified. | MISSING | After firewall review, add only VM NSG ingress from the pod NSG to 5432 and 6379 | Yes |
-| Secrets and ConfigMaps | Live namespace has only `kube-root-ca.crt` and `ocir-pull-secret`. | PARTIAL | Confirm sources for five worker keys, direct storage identity, runtime configuration and CA trust. | Yes for creation/update |
-| Migrations | Local isolated DB applied `0001_initial` and `0002_callback_delivery`; production state unknown | PARTIAL | Verify production migration state; apply only with approval if missing | Yes, if required |
+| ARM64 image | Fresh local worker harness passed. Docker reports `linux/arm64` at local image ID `sha256:e3c94ebfffc7e4c7e09b75765442c0bfa761e008ed6f22ee3686bee52ffbb761`. | LOCAL VERIFIED | Publish the reviewed commit with unique tag and capture registry digest | Yes, remote push/publication |
+| PostgreSQL | Live TLS off and processing DB/role absent. | BLOCKED | Stage verified TLS, restricted database/role and migrations before OCI ingress. | Yes |
+| Redis | Live TLS off and default ACL user has no password. Existing Django broker is loopback DB 0. | BLOCKED | Stage authenticated private TLS and move producer/worker to the same DB with named ACLs. | Yes |
+| Network security | Existing OCI ingress absent and pod egress permits the path. Docker publishes wildcards with empty DOCKER-USER. | BLOCKED | Restrict publishes and forwarding first. Then add only VM NSG ingress from the pod NSG to verified TLS ports. | Yes |
+| Django and storage | Live SCRUM-125 checkout has no S3 locator, no service token loaded and uses filesystem storage. | BLOCKED | Prepare a separately approved API/secure storage cutover. Verify the backend release test results first. | Yes |
+| Secrets and ConfigMaps | Last live namespace had only `kube-root-ca.crt` and `ocir-pull-secret`. VM does not hold dedicated worker credentials. | BLOCKED | Approve new scoped worker credentials, storage identities, runtime configuration and CA trust. | Yes |
+| Migrations | Local isolated DB applied both processing migrations. No production processing DB exists. Application migration history differs from the candidate as noted above. | BLOCKED | Verify application migration plan on a protected clone, then approve both database plans. | Yes |
 | Worker deployment | Updated local manifest schema and dependency probes passed. Live namespace has only the frontend Deployment. | PARTIAL | Confirm production inputs, pin approved digest, and validate dependency access before rollout. | Yes |
-| Task submission and callbacks | Local tests pass; production API and worker path unverified | BLOCKED | Submit a non-sensitive real document after rollout and verify both callbacks | Yes, production deployment/test |
+| Task submission and callbacks | Live callback path exists, but token and new locator are missing. | BLOCKED | Submit a non-sensitive real document after approved upgrade and worker rollout, then verify callback. | Yes, production deployment/test |
 | End-to-end document processing | No production task has been submitted | MISSING | Complete the full API → queue → OKE worker → DB/callback/result test | Yes, production deployment/test |
 
 ## Validation and rollback plan
@@ -678,7 +732,7 @@ exists, do not overwrite it; use a revision rollback only after confirming it
 belongs to SCRUM-122. Do not touch other workloads, the production VM, API,
 frontend, Redis, or database.
 
-## Next consolidated production-change approval checkpoint
+## Approval-specific execution notes
 
 The following work remains gated and has not been performed:
 
@@ -697,9 +751,9 @@ The following work remains gated and has not been performed:
    new group using the current VNIC membership snapshot.
 3. **Image publication.** Create private OCIR repository
    `studyforge/document-processing` if still absent. Push the reviewed branch
-   as proposed branch `release/scrum-122-oke-arm64` to
-   `Sanish25/studyforge-arm64-build`, dispatch `processing-arm64.yml` for
-   that ref,
+   `feature/SCRUM-122-deploy-kubernetes-to-processing` to
+   `Sanish25/studyforge-arm64-build` only after approval, dispatch
+   `processing-arm64.yml` explicitly for that ref after publication approval,
    and record its unique tag and immutable digest. Repository secrets exist by
    name, but their values have not been read. The repository creation command
    after approval is:
@@ -741,3 +795,24 @@ did not bypass an active configured approval gate, although publication still
 remains explicitly approval-gated for this task. Establish a real protected
 publishing environment or equivalent repository policy if GitHub itself must
 enforce reviewer approval before a future dispatch.
+
+## Local validation on the consolidated branch
+
+- Workflow lint, Kubernetes v1.35.2 schema validation (3 resources),
+  `bash -n` and ShellCheck passed. The legacy Cloud Shell script is
+  syntactically valid and refuses direct execution.
+- The fresh local ARM64 worker build passed worker registration and queue
+  consumption, 68 service tests in each of three contexts, 23 persistence
+  tests, both processing migrations and the Redis outage check.
+- The manifest's exact startup wrapper blocked a failed check and preserved
+  the command arguments on success. The probe passed with healthy mocked
+  dependencies in the ARM64 image and rejected missing Redis authentication
+  and independent DB, Redis and storage failures.
+- The full backend regression including the isolated S3 integration ran
+  against disposable PostgreSQL. It reported 791 passed and 529 subtests
+  passed, including SCRUM-127 S3 integration and all 16 SCRUM-130 tests.
+  Two tests in the inherited application baseline failed. The question API
+  test references an undefined `RetryableProcessingError`, and the
+  Gemini factory test omits the OpenAI key with fallback enabled. No backend
+  application files were changed by consolidation. Resolve or explicitly
+  disposition these before approving the production Django upgrade.
