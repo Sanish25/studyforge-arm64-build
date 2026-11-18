@@ -63,7 +63,9 @@ def _embed_batch(
             config=types.EmbedContentConfig(output_dimensionality=dimension),
         )
     except Exception as exc:
-        raise _classify_provider_error(exc) from exc
+        # Provider exception text can include request details. Keep diagnostics
+        # categorical and suppress unsafe chained tracebacks.
+        raise _classify_provider_error(exc) from None
 
     embeddings = getattr(response, "embeddings", None)
     returned = 0 if embeddings is None else len(embeddings)
@@ -88,8 +90,8 @@ def _embed_batch(
 
 def _classify_provider_error(exc: Exception) -> ProcessingError:
     if _is_retryable(exc):
-        return RetryableProcessingError(f"Gemini embedding request failed temporarily: {exc}")
-    return PermanentProcessingError(f"Gemini embedding request failed: {exc}")
+        return RetryableProcessingError("Gemini embedding request failed temporarily.")
+    return PermanentProcessingError("Gemini embedding request failed.")
 
 
 def _is_retryable(exc: Exception) -> bool:

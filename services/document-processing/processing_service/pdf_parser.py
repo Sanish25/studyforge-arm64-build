@@ -48,8 +48,8 @@ def extract_pdf_text(source: Any) -> ExtractionResult:
         reader = reader_cls(source)
     except PermanentProcessingError:
         raise
-    except Exception as exc:
-        raise InvalidPDFError("The uploaded file is not a valid PDF.") from exc
+    except Exception:
+        raise InvalidPDFError("The uploaded file is not a valid PDF.") from None
 
     if getattr(reader, "is_encrypted", False):
         raise InvalidPDFError("Encrypted PDFs are not supported.")
@@ -59,10 +59,10 @@ def extract_pdf_text(source: Any) -> ExtractionResult:
     for index, page in enumerate(raw_pages):
         try:
             page_text = page.extract_text() or ""
-        except Exception as exc:
+        except Exception:
             raise InvalidPDFError(
                 f"Failed to extract text from PDF page {index + 1}."
-            ) from exc
+            ) from None
         extracted_pages.append(PageText(page_number=index + 1, text=page_text))
 
     if not extracted_pages:

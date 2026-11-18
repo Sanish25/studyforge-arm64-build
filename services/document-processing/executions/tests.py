@@ -213,8 +213,7 @@ class WorkerExecutionTests(TestCase):
             return "applied"
 
         result, fetch, extract, chunk, embed, send = self.run_worker(callback)
-        self.assertEqual(result["status"], "SUCCEEDED")
-        self.assertEqual(result["attempt"], 1)
+        self.assertEqual(result, {"job_id": 101, "document_id": 42, "attempt": 1, "status": "SUCCEEDED"})
         self.assertEqual(send.call_count, 2)
         fetch.assert_called_once()
         extract.assert_called_once()
@@ -232,8 +231,9 @@ class WorkerExecutionTests(TestCase):
             patch("processing_service.tasks.fetch_source_document", side_effect=ValueError("private detail")),
             patch("processing_service.tasks.submit_callback", return_value="applied") as send,
         ):
-            with self.assertRaisesRegex(ValueError, "private detail"):
+            with self.assertRaisesRegex(PermanentProcessingError, "Document processing failed") as caught:
                 process_document_task.run(101, 42, DIGEST)
+        self.assertNotIn("private detail", str(caught.exception))
         execution = Execution.objects.get(job_id=101)
         self.assertEqual(execution.status, Execution.Status.FAILED)
         self.assertEqual(execution.delivery_status, Execution.DeliveryStatus.DELIVERED)
@@ -266,7 +266,7 @@ class WorkerExecutionTests(TestCase):
             patch("processing_service.tasks.submit_callback", return_value="duplicate") as send,
         ):
             result = process_document_task.run(101, 42, DIGEST)
-        self.assertEqual(result, staged)
+        self.assertEqual(result, {"job_id": 101, "document_id": 42, "attempt": 1, "status": "SUCCEEDED"})
         self.assertEqual(send.call_args.args[1], staged)
         self.assertEqual(send.call_args.args[1]["attempt"], 1)
         self.assertEqual(send.call_count, 1)
@@ -305,7 +305,9 @@ class WorkerExecutionTests(TestCase):
             patch("processing_service.tasks.embed_texts") as embed,
             patch("processing_service.tasks.submit_callback", return_value="applied") as send,
         ):
-            self.assertEqual(process_document_task.run(101, 42, DIGEST), staged)
+            self.assertEqual(process_document_task.run(101, 42, DIGEST), {
+                "job_id": 101, "document_id": 42, "attempt": 1, "status": "FAILED",
+            })
         fetch.assert_not_called()
         extract.assert_not_called()
         embed.assert_not_called()

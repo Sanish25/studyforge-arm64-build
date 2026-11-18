@@ -11,8 +11,7 @@ from .chunking import chunk_pages
 from .embedding_service import embed_texts
 from .errors import DocumentDeletedError, PermanentProcessingError, RetryableProcessingError
 from .document_parser import extract_document
-from .embedding_service import embed_texts
-from .errors import OversizedCallbackError, PermanentProcessingError, RetryableProcessingError
+from .errors import OversizedCallbackError
 from .result_client import submit_callback
 from .source_client import fetch_source_document
 
@@ -30,7 +29,10 @@ TASK_RETRY_COUNTDOWN_SECONDS = 60
     name="processing_service.tasks.process_document_task",
     max_retries=TASK_MAX_RETRIES,
     default_retry_delay=TASK_RETRY_COUNTDOWN_SECONDS,
-    ignore_result=False,
+    # The successful callback can contain extracted document text and vectors.
+    # Celery records task return values in result events/backends, so return only
+    # non-sensitive correlation metadata and do not persist a task result.
+    ignore_result=True,
 )
 def process_document_task(
     self,
@@ -38,11 +40,11 @@ def process_document_task(
     document_id: int,
     source_sha256: str,
 ) -> dict[str, Any]:
-    """Stage one terminal result before delivery; retries replay staged data."""
+    """Stage and deliver the terminal callback; expose only safe task metadata."""
     execution_store.get_or_create_execution(job_id, document_id, source_sha256)
     attempt, saved = execution_store.start_or_resume(job_id)
     if saved is not None:
-        return _deliver_saved(self, job_id)
+        return _task_receipt(_deliver_saved(self, job_id))
 
     identity = {
         "schema_version": 1,
@@ -63,7 +65,7 @@ def process_document_task(
     except DocumentDeletedError:
         # A user deletion is terminal. Do not retry or send a FAILED callback
         # for a document that no longer exists.
-        return {**identity, "status": "DELETED"}
+        return _task_receipt({**identity, "status": "DELETED"})
     except RetryableProcessingError as exc:
         if attempt <= PROCESSING_MAX_RETRIES and self.request.retries < TASK_MAX_RETRIES:
             execution_store.prepare_processing_retry(job_id)
@@ -74,7 +76,10 @@ def process_document_task(
     except Exception:
         _stage_failure(job_id, identity)
         _deliver_saved(self, job_id)
-        raise
+        # Third-party exceptions may include request bodies or document text.
+        # Preserve task failure semantics without exposing their messages or
+        # chained tracebacks through Celery logs/events.
+        raise PermanentProcessingError("Document processing failed.") from None
 
     result = {
         **identity,
@@ -98,7 +103,17 @@ def process_document_task(
         _stage_failure(job_id, identity)
         _deliver_saved(self, job_id)
         raise
-    return _deliver_saved(self, job_id)
+    return _task_receipt(_deliver_saved(self, job_id))
+
+
+def _task_receipt(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the minimal safe correlation/status fields for Celery telemetry."""
+    return {
+        "job_id": payload["job_id"],
+        "document_id": payload["document_id"],
+        "attempt": payload["attempt"],
+        "status": payload["status"],
+    }
 
 
 def _stage_failure(job_id: int, identity: dict[str, Any]) -> None:

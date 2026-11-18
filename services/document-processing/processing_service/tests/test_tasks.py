@@ -85,7 +85,29 @@ class DocumentTaskTests(SimpleTestCase):
         embed.assert_called_once_with(["page text"])
         self.assertEqual([call.args[1]["status"] for call in callback.call_args_list], ["RUNNING", "SUCCEEDED"])
         self.assertEqual(result["attempt"], 1)
-        self.assertEqual(result["chunks"][0]["embedding"], [0.5] * 768)
+        self.assertEqual(result, {"job_id": 17, "document_id": 42, "attempt": 1, "status": "SUCCEEDED"})
+        self.assertTrue(process_document_task.ignore_result)
+        self.assertNotIn("embedding", repr(result))
+
+    def test_celery_result_receipt_never_contains_document_text_or_embeddings(self):
+        marker = "PRIVATE_DOCUMENT_MARKER_4c9a7f"
+        store = new_task_store()
+        with (
+            patch("processing_service.tasks.execution_store", store),
+            patch("processing_service.tasks.fetch_source_document", return_value=SourceDocument(b"%PDF", "application/pdf")),
+            patch("processing_service.tasks.extract_document", return_value=extraction()),
+            patch("processing_service.tasks.chunk_pages", return_value=[TextChunk(1, marker)]),
+            patch("processing_service.tasks.embed_texts", return_value=[[0.123] * 768]),
+            patch("processing_service.tasks.submit_callback", side_effect=["applied", "applied"]) as callback,
+        ):
+            result = process_document_task.run(17, 42, DIGEST)
+
+        callback_payload = callback.call_args_list[-1].args[1]
+        self.assertIn(marker, callback_payload["chunks"][0]["content"])
+        self.assertEqual(result["status"], "SUCCEEDED")
+        self.assertNotIn(marker, repr(result))
+        self.assertNotIn("0.123", repr(result))
+        self.assertTrue(process_document_task.ignore_result)
 
     def test_retryable_processing_failure_requests_new_attempt(self):
         store = new_task_store()
@@ -110,8 +132,9 @@ class DocumentTaskTests(SimpleTestCase):
             patch("processing_service.tasks.fetch_source_document", side_effect=ValueError("private source detail")),
             patch("processing_service.tasks.submit_callback", side_effect=["applied", "applied"]) as callback,
         ):
-            with self.assertRaisesRegex(ValueError, "private source detail"):
+            with self.assertRaisesRegex(PermanentProcessingError, "Document processing failed") as caught:
                 process_document_task.run(17, 42, DIGEST)
+        self.assertNotIn("private source detail", str(caught.exception))
         failed = store.stage_terminal.call_args.args[1]
         self.assertEqual(failed["status"], "FAILED")
         self.assertEqual(failed["error_code"], "PROCESSING_FAILED")
@@ -166,7 +189,7 @@ class DocumentTaskTests(SimpleTestCase):
             patch("processing_service.tasks.submit_callback", return_value="duplicate") as callback,
         ):
             result = process_document_task.run(17, 42, DIGEST)
-        self.assertEqual(result, saved)
+        self.assertEqual(result, {"job_id": 17, "document_id": 42, "attempt": 3, "status": "SUCCEEDED"})
         self.assertEqual(callback.call_args.args[1]["attempt"], 3)
         store.mark_delivered.assert_called_once_with(17)
         store.stage_terminal.assert_not_called()
@@ -191,7 +214,7 @@ class DocumentTaskTests(SimpleTestCase):
         retry.assert_not_called()
         self.assertEqual(callback.call_count, 1)
         self.assertEqual(callback.call_args.args[1]["status"], "RUNNING")
-        self.assertEqual(result["status"], "DELETED")
+        self.assertEqual(result, {"job_id": 17, "document_id": 42, "attempt": 1, "status": "DELETED"})
         extract.assert_not_called()
         chunk.assert_not_called()
         embed.assert_not_called()
