@@ -1,6 +1,230 @@
 # SCRUM-122: OKE document-processing worker
 
-**Status on 2026-11-17.** Authorized VM access is verified, and the official
+**Status updated 2026-11-18.** Phases 1–3 safe checks are verified. No worker
+resources have been applied; final deployment and end-to-end document
+acceptance remain blocked on the Django/Object Storage, PostgreSQL, Redis, and
+private-network dependencies described below. The concise phase tracker is
+[`docs/SCRUM-122-execution-status.md`](../SCRUM-122-execution-status.md).
+
+## Purpose, architecture and teammate handoff
+
+SCRUM-122 delivers a standalone Celery document-processing worker on the
+existing private OKE cluster, scheduled onto its ARM64 node. StudyForge's
+Django API already dispatches document jobs to the `document-processing`
+Celery queue. The OKE worker provides a separately deployable consumer for
+that queue, so PDF/DOCX/PPTX extraction, chunking and Gemini embeddings do not
+run inside the Django web process. It reports the result through the existing
+authenticated callback path. The worker is not deployed yet.
+
+```mermaid
+flowchart LR
+  OP[Operator workstation] -->|temporary SSH port-forward| B[OCI Bastion]
+  B -->|private OKE API :6443| K[OKE control plane]
+  K --> N[Existing ARM64 node]
+  R[OCIR immutable ARM64 image] -->|ocir-pull-secret| N
+  N --> W[Celery worker: document-processing]
+  D[Django API] -->|publish task| Q[Redis TLS + named ACL]
+  Q -->|consume task| W
+  W -->|HTTPS locator + callback| D
+  W -->|read-only object access| S[Private Object Storage]
+  W -->|TLS verify-full| P[PostgreSQL processing database]
+  W -->|HTTPS embedding requests| G[Gemini]
+```
+
+The Bastion path is for the operator's temporary access to the private
+Kubernetes API; it is not the worker's service-data path. OKE pulls the
+published image from OCIR using the existing registry Secret. At runtime the
+worker consumes Redis messages, fetches the authorized object locator from
+Django, reads the object with a separate read-only identity, verifies the
+source hash, extracts and chunks the document, requests embeddings, stores
+execution data in its restricted PostgreSQL database, and sends the terminal
+result to Django. Network access to these private services and approved TLS,
+identity and credential configuration must be ready before rollout.
+
+| Phase | Result | Evidence and remaining gate |
+|---|---|---|
+| 1. Secure OKE API access | Complete | OCI profile reauthenticated; approved temporary Bastion port-forward verified node `10.0.1.63` Ready/`arm64` on Kubernetes `v1.35.2`; tunnel stopped and session deleted. No allowlist or network rules changed. |
+| 2. ARM64 image | Complete | Native `ubuntu-24.04-arm` workflow run `44434934736` built, published, pulled and verified `linux/arm64`; Buildx and registry digests matched. Python, local ARM64 worker harness and image checks passed as recorded below. |
+| 3. Manifest and cluster preflight | Safe checks complete | YAML parsed; strict kubeconform v1.35.2 passed 3/3; strict OKE server-side dry-run accepted the ServiceAccount, ConfigMap and Deployment. Live inventory confirmed the pull-secret registry host. All temporary access was removed. Worker runtime objects are absent; no resources were applied. |
+| 4. Dependency cutover and deploy | Blocked / not started | Await Sudin's deployed Django/S3 locator and Object Storage integration; await Nischal's verified PostgreSQL TLS/role/migrations, Redis TLS/auth and private network path. Provision approved runtime ConfigMaps, Secret and trust. Then obtain separate explicit Kubernetes apply approval. |
+| 5. End-to-end acceptance | Not started | Requires one owner-approved non-sensitive document and successful OKE task, execution, callback and final document status verification. |
+
+### Problems encountered and resolution
+
+- OCI security-token authentication had expired, and the documented Bastion
+  forward was gone. Localhost refused connections because there was no active
+  tunnel. Browser reauthentication restored OCI access; after explicit
+  approval, one temporary session was created, used, and deleted.
+- The managed sandbox denied direct kubectl access to the loopback tunnel and
+  initially could not reach the remote kubeconform schema host. Narrowly
+  approved out-of-sandbox checks reached OKE and fetched Kubernetes v1.35.2
+  schemas; the tunnel itself and API were healthy.
+- Docker Desktop was unavailable during the final publication step. The
+  reviewed workflow used its native ARM64 hosted runner, so no reinstall,
+  system permission changes, or emulated publication were needed.
+- Live checks found worker dependency objects absent. This is now documented
+  as a deployment blocker; the Kubernetes dry-run intentionally created
+  nothing and does not claim service connectivity or end-to-end processing.
+
+### Files changed and why
+
+The feature delta from `origin/development` is limited to these SCRUM-122
+artifacts and worker hardening:
+
+| File(s) | Purpose / impact |
+|---|---|
+| `services/document-processing/processing_service/tasks.py` | Celery now ignores persisted task results and returns only safe correlation/status fields through `_task_receipt`; original extracted text and embeddings remain in the authenticated callback, not task-result telemetry. Generic failures keep FAILED semantics while suppressing exception details. |
+| `services/document-processing/processing_service/document_parser.py`, `pdf_parser.py`, `embedding_service.py` | Suppress unsafe parser/provider exception chains and use categorical errors so document snippets, request details and provider responses are not copied into Celery errors/logs. Retry classification is retained. |
+| `services/document-processing/processing_service/tests/test_tasks.py`, `services/document-processing/processing_service/tests/test_embedding_service.py`, `services/document-processing/executions/tests.py` | Regression coverage for safe receipts, ignored results, unchanged callbacks, sanitized failures and execution/callback behavior. |
+| `services/document-processing/oke-worker.yaml` | Defines the worker ServiceAccount, checked-in ConfigMap and one-replica Deployment; pins the approved OCIR digest, ARM64 scheduling, existing pull secret, secure runtime references, probes, resource limits and pod security settings. |
+| `.github/workflows/processing-arm64.yml` | Manual-only native ARM64 publication; checks runner architecture and OCIR login, publishes `linux/arm64`, pulls it back, checks platform and compares the pulled digest with Buildx output. |
+| `scripts/scrum122-oke-connect.sh` | Opens/closes a pinned-host SSH tunnel only through an ACTIVE, correctly targeted Bastion session; uses a dedicated kubeconfig and verifies Ready-node count. |
+| `scripts/scrum122-cloudshell-preflight.py` | Retained historical preflight only; its CLI is retired and it must not be used as the current deployment workflow. |
+| `docs/deployment/scrum-122-oke-worker.md`, `docs/SCRUM-122-execution-status.md` | Staged production plan, execution evidence, rollout/rollback gates and current teammate handoff. |
+
+The `Dockerfile`, `requirements.txt`, and Compose definitions were reviewed but
+not changed for this release; the Python 3.12 base is multi-architecture. The
+only feature source changes are the worker telemetry/error-handling code and
+its regression tests listed above.
+
+The local branch is `feature/SCRUM-122-deploy-kubernetes-to-processing` at
+`b255beb`; its source/publish checkpoint is `6db5c95`. The image was built
+from source SHA `6db5c95...`; `b255beb` records the digest pin and documentation
+only. Do not rebuild from a different source SHA without a reviewed publication.
+
+### Verified image and validation
+
+- Image tag: `arm64-6db5c95eb415d5407061140903998a4f8ec56be3-44434934736-1`.
+- Immutable image:
+  `phx.ocir.io/axcyydnoof5f/studyforge/document-processing@sha256:c07d7b5d5fd4b089f65617733e100f0f062cd76122fe10366c3496b0f14858f6`.
+- Workflow run `44434934736` succeeded on `ubuntu-24.04-arm`; architecture check
+  returned `aarch64`; pulled image was `linux/arm64`; Buildx and pulled registry
+  digests matched `sha256:c07d7b5d5fd4b089f65617733e100f0f062cd76122fe10366c3496b0f14858f6`.
+- Recorded worker evidence includes a Python run of 71 passed, 3 skipped and
+  14 subtests, plus a separate full disposable ARM64 Compose run with 70
+  service tests, 23 execution-store/callback tests, worker registration/queue,
+  migration-drift, isolation, restart-persistence and Redis-outage checks
+  passing. These are separate runs, not additive counts, and neither is a
+  production document acceptance test.
+- `yq eval-all -o=json` parsed all three manifest documents;
+  `kubeconform -strict -summary -kubernetes-version 1.35.2` reported Valid 3,
+  Invalid 0, Errors 0; OKE `kubectl apply --dry-run=server --validate=strict`
+  accepted all three objects. A post-dry-run inventory confirmed they remained
+  absent.
+
+### Teammate dependencies and deployment sequence
+
+**Sudin / Django and Object Storage:** the SCRUM-127 code branch documents S3
+storage, an authenticated job-object locator, shared service token and
+read-only worker identity. The recorded production Django checkout predates
+that integration and used filesystem storage. Confirm the reviewed Django
+release is deployed, the selected bucket is private/encrypted, Django has a
+scoped write identity, the worker has scoped read/HeadBucket access, and the
+HTTPS locator and callback accept the shared token. Verify an approved fixture
+and hash end-to-end in staging.
+
+**Nischal / PostgreSQL, Redis and networking:** the recorded live baseline had
+PostgreSQL TLS disabled and no dedicated processing DB/role/migrations; Redis
+was plaintext with unauthenticated default ACL and no TLS listener; OKE data
+paths were blocked. Confirm PostgreSQL `verify-full` endpoint/CA, restricted
+processing login/database and both execution migrations. Confirm Redis TLS,
+named authenticated producer/worker ACLs on the same DB/queue, durable backup
+and queue continuity. Then prove private firewall/NSG paths from OKE without
+public DB/Redis exposure. Branch code or historical plans alone do not prove
+production cutover; collect current owner verification.
+
+**Final deployment operator:** do not start until both sets of dependencies
+and the missing worker runtime objects below are verified. Preserve the
+existing frontend and databases. Request separate approvals for any production
+cutover, Secret/configuration creation, Kubernetes apply, and real production
+document test. Detailed staging, backup, rollout, stop conditions and rollback
+are in [the staged production plan](#proposed-production-approval-checkpoints)
+and [end-to-end acceptance evidence](#end-to-end-acceptance-evidence).
+
+#### Final deployment command sequence
+
+The temporary Bastion session used for the Phase 3 check is deleted. A future
+operator must revalidate OCI authentication and session inventory; obtain
+specific approval before creating another temporary Bastion session. The last
+verified cluster inventory showed only the frontend and `ocir-pull-secret`.
+Never copy secret values into a command line or terminal output.
+
+1. **Close dependency gates first.** Obtain Sudin's current proof that Django's
+   S3 mode, private bucket, object locator, callback and shared token work in
+   the approved release. Obtain Nischal's current proof of PostgreSQL TLS/CA,
+   restricted processing DB/role and migrations, Redis TLS/auth/queue and
+   private OKE network paths. Stage and approve trust/runtime ConfigMaps and
+   Secret through the approved secret-management procedure. Required names and
+   keys are in the runtime input table below. Stop if any object or endpoint is
+   missing, a TLS identity does not validate, or the dependencies are not
+   reachable from the OKE pod network.
+2. **Restore temporary API access.** From the repository root, validate the
+   OCI profile and reauthenticate only if expired:
+
+   ```sh
+   oci session validate --profile studyforge-scrum122-local --local
+   # Run this only if local validation reports an expired session.
+   oci session authenticate --region us-phoenix-1 --profile-name studyforge-scrum122-local
+   ```
+
+   Re-read the Bastion state and client allowlist. After separate explicit
+   approval, create one 3,600-second port-forward session to `10.0.1.9:6443`
+   using `~/.ssh/studyforge-oke-bastion.pub`, then start
+   `bash scripts/scrum122-oke-connect.sh start <approved-session-id>`. The
+   helper verifies the ACTIVE session target and pinned Bastion host key.
+3. **Revalidate and dry-run.** Use the dedicated kubeconfig for node,
+   namespace, Secret-key-presence and current resource checks. Do not print
+   `.dockerconfigjson` data or worker Secret values. Recheck the image digest,
+   then run:
+
+   ```sh
+   kubeconform -strict -summary -kubernetes-version 1.35.2 services/document-processing/oke-worker.yaml
+   kubectl --kubeconfig "$HOME/.kube/studyforge-oke-bastion" -n studyforge apply --dry-run=server --validate=strict -f services/document-processing/oke-worker.yaml
+   ```
+
+   **Stop here** if the live image/pull secret, required ConfigMap/Secret keys,
+   ARM64 Ready node, namespace, admission validation or dependency readiness
+   differs from the reviewed state. Close the tunnel and delete the temporary
+   session after preflight.
+4. **Apply only after a separate explicit approval of the final diff.** Reopen
+   a temporary tunnel under its approval and apply the reviewed manifest:
+
+   ```sh
+   kubectl --kubeconfig "$HOME/.kube/studyforge-oke-bastion" -n studyforge apply -f services/document-processing/oke-worker.yaml
+   kubectl --kubeconfig "$HOME/.kube/studyforge-oke-bastion" -n studyforge rollout status deployment/processing-worker --timeout=5m
+   kubectl --kubeconfig "$HOME/.kube/studyforge-oke-bastion" -n studyforge get pods -l app.kubernetes.io/name=processing-worker -o wide
+   ```
+
+   Confirm the Ready pod is on a Ready `arm64` node, and inspect its
+   `status.containerStatuses[].imageID` without dumping environment values.
+   Confirm readiness and authenticated Redis/DB/S3 dependency checks, and
+   verify the image ID resolves to the immutable digest above. A configured
+   Secret reference alone does not prove a successful OCIR pull.
+5. **Run one approved end-to-end document test.** Only after the product owner
+   approves a non-sensitive document, record its authorized job/document ID
+   and source hash; verify OKE task receipt, read-only object retrieval and hash,
+   execution `SUCCEEDED`, callback `DELIVERED`, Django job `SUCCEEDED`, document
+   `READY`, and persisted chunks. Confirm the existing frontend, Django health,
+   and legacy `celery` queue remain healthy. Follow the full evidence list
+   below; do not record document text, object keys, tokens, vectors or secrets.
+6. **Rollback if any check fails.** Stop this worker first (scale the new
+   deployment to zero or delete only `deployment/processing-worker`), then
+   remove only the worker ConfigMap and ServiceAccount created by this rollout.
+   Remove trust/runtime Secret objects only when they were created exclusively
+   for this worker and the owner approves their removal. Keep the frontend,
+   source objects, processing/database records and OCIR image. Preserve failed
+   job metadata for investigation; do not flush Redis, delete data, or replay
+   messages blindly. Stop the SSH tunnel, verify port 16443 is closed, and
+   delete the temporary Bastion session.
+
+The local-only companion file `private-scrum-notes/SCRUM-122-private-handoff.md`
+explains implementation behavior and impact in more detail. The directory is
+excluded by this workstation's `.git/info/exclude`; it is not part of the
+shared repository handoff.
+
+---
+
+**Historical verified production baseline (2026-11-17).** Authorized VM access is verified, and the official
 SCRUM-122 feature branch is the local source of truth. Live service inspection
 confirmed that the Django API, PostgreSQL, Redis, and storage need a coordinated
 cutover before the worker can run. SCRUM-122 is complete after a real document
@@ -120,16 +344,18 @@ the recovered staging database before approving application migrations.
   live firewall, authenticated DB, or credential evidence. No sudo or
   privilege change was attempted. [Oracle Run Command](https://docs.oracle.com/en-us/iaas/Content/Compute/Tasks/runningcommands.htm)
 
-## Updated local worker manifest
+## Current worker manifest and runtime inputs
 
-`services/document-processing/oke-worker.yaml` now targets an ARM64 node and
+`services/document-processing/oke-worker.yaml` targets an ARM64 node and
 enforces SCRUM-127's direct storage and secure transport contract. It sets the
 standalone Django settings module for probes, reuses the service's readiness
 check for DB, Redis and bucket access, and keeps one worker replica, the
-existing queue, the 150-second termination grace and the private Django
-HTTPS route. The draft intentionally has an unresolved image digest and
-requires the separately supplied runtime and trust ConfigMaps. The official
-feature branch includes the SCRUM-127 worker source after consolidation.
+existing queue, the 150-second termination grace and the private Django HTTPS
+route. The manifest is pinned to the verified Phase 2 digest below. It
+references runtime and trust ConfigMaps and a Secret that are not present in
+the current namespace; do not apply it until those approved inputs exist and
+the final diff is reviewed. The official feature branch includes the SCRUM-127
+worker source after consolidation.
 The command checks the named Redis credential and dependency readiness
 before starting Celery. It replaces the shell with Celery as PID 1 after
 the check succeeds.
@@ -150,8 +376,9 @@ installed Redis client's constructor defaults to `ssl_check_hostname=True`.
 Gemini embeddings remain unchanged and the worker has no OpenAI configuration.
 The separate SCRUM-130 Django release remains outside this rollout.
 
-`kubeconform -strict -kubernetes-version 1.35.2` validated all three draft
-resources. The exact Kubernetes probe was run in the local `linux/arm64`
+`kubeconform -strict -kubernetes-version 1.35.2` validated all three resources.
+The later Phase 3 server-side dry-run also passed. The exact Kubernetes probe
+was run in the local `linux/arm64`
 candidate, with networking disabled and disposable settings. It passed on
 healthy mocked dependencies and returned failure for each independent DB,
 Redis, and bucket outage. `actionlint` passed. Before applying the worker,
@@ -688,7 +915,12 @@ inventory before retrying creation.
    signal that PID. Stopping the local listener leaves the OCI resources in
    place and the session expires automatically.
 
-## Evidence tracker (2026-11-17)
+## Historical evidence tracker (2026-11-17)
+
+This table is the earlier pre-publication/pre-Phase-3 snapshot. Its expired
+session, missing image, and pending-read statements are historical; the
+current verified results above and in the 2026-11-18 checkpoints below
+supersede them.
 
 | Component | Current evidence | Status | Remaining work / proposed action | Approval required |
 |---|---|---|---|---|
@@ -866,13 +1098,14 @@ superseded by the Phase 2 publication checkpoint below. The approved
 `feature/SCRUM-122-deploy-kubernetes-to-processing` ref was created in the
 GitHub mirror at the exact current source SHA before dispatch.
 
-Local checks completed for the current files: actionlint, ShellCheck, Bash and
-Python syntax, YAML syntax parsing, and a scan for common embedded private keys,
-access tokens and credential-bearing Redis/PostgreSQL URLs. Kubeconform parsed
-the manifest but could not download Kubernetes v1.35.2 schemas because this
-environment cannot resolve its schema host. Earlier validation of this draft
-is recorded above; a fresh strict schema result remains pending. No dependency
-was installed to bypass the network restriction.
+At this historical pre-publication checkpoint, actionlint, ShellCheck, Bash
+and Python syntax, YAML parsing, and credential-pattern scans passed.
+Kubeconform could not download Kubernetes v1.35.2 schemas from the restricted
+environment, so that checkpoint did not claim schema validity. The later
+Phase 3 verification above retrieved the v1.35.2 schemas outside the sandbox
+and passed strict validation; the current OKE API also accepted server-side
+dry-run for all three manifest resources. No dependency was installed to
+bypass the earlier network restriction.
 
 ### Django release candidate and worker contract
 
@@ -1384,9 +1617,10 @@ restart persistence and Redis-outage checks passed. The disposable Compose
 containers, network and database volume were removed. This is local worker
 runtime and test evidence, not a real production document job or end-to-end
 OKE acceptance. `actionlint`, ShellCheck, Python compilation, YAML syntax and
-`git diff --check` passed. Kubeconform could not retrieve Kubernetes schemas
-because DNS/network access to `raw.githubusercontent.com` is unavailable; no
-schema verdict is claimed.
+`git diff --check` passed. At that earlier local checkpoint kubeconform could
+not retrieve schemas because sandbox DNS/network access was unavailable; the
+current schema and live server-side validation results are recorded in the
+Phase 3 access checkpoint below.
 
 The durable callback payload is still retained in `Execution.callback_payload`
 after delivery. Before delivery, it is required to replay exactly the same
