@@ -853,22 +853,18 @@ and builds `services/document-processing` for `linux/arm64`. Its destination is
 GitHub SHA, run ID and attempt, and the build digest is recorded. Unique tags
 are not registry-enforced immutability: the Deployment must use the recorded
 `image@sha256:<digest>`, never a tag. The workflow currently verifies the
-pulled tag's platform but does not compare the pulled repository digest with
-the Buildx output digest; compare both explicitly during the approved publish
-stage. `provenance: false` means this workflow does not produce BuildKit
-provenance attestations. The prior OCI inventory found no processing image
-repository. The existing pull Secret is not proof that this repository can be
-pulled.
+pulled tag's platform and compares the pulled repository digest with the
+Buildx output digest. `provenance: false` means this workflow does not produce
+BuildKit provenance attestations. The prior OCI inventory found no processing
+image repository; subsequent approved publication has verified the designated
+repository exists and accepts the pushed image. The existing pull Secret is
+not proof that Kubernetes can pull this repository.
 
-The intended source candidate is the current official branch tip, `2a4bdd8`,
-because it contains the SCRUM-127 worker source and the reviewed manifest. The
-workflow runs in the GitHub mirror and checks out its dispatch ref. The
-available `github/chore/scrum-122-arm64-pipeline` ref is `27fc947`; compared
-with the candidate it lacks the SCRUM-127 direct-storage worker changes across
-13 processing-service paths. Do not dispatch from that old ref. After separate
-Bitbucket push and mirror approvals, publish only when the mirror ref resolves
-to the approved source SHA. If the worker logging hardening below changes
-service code, publish from the resulting reviewed SHA instead of `2a4bdd8`.
+The earlier intended source candidate `2a4bdd8` and the available
+`github/chore/scrum-122-arm64-pipeline` ref `27fc947` are historical and
+superseded by the Phase 2 publication checkpoint below. The approved
+`feature/SCRUM-122-deploy-kubernetes-to-processing` ref was created in the
+GitHub mirror at the exact current source SHA before dispatch.
 
 Local checks completed for the current files: actionlint, ShellCheck, Bash and
 Python syntax, YAML syntax parsing, and a scan for common embedded private keys,
@@ -1434,6 +1430,10 @@ The focused Gemini and SCRUM-130 fallback suite passed in an isolated Python
 Knowledge/RAG undefined `RetryableProcessingError` remains unchanged for its
 feature owner to review.
 
+The following paragraphs are a historical pre-publication checkpoint at
+`2a4bdd8`; the Phase 2 publication record below supersedes its publication
+status and source SHA.
+
 The manual ARM64 workflow remains the only publisher and retains its unique
 SHA/run/attempt tag, protected GitHub secrets, explicit `linux/arm64` build,
 and source-revision labels. It now compares the pulled OCIR repository digest
@@ -1476,3 +1476,142 @@ and CA delivery, reviewed Django release and migration plan, protected
 backups, and assigned owners and maintenance window still require approval
 or verification. Git pushes, OCIR repository creation and publish, OKE
 resources, and real document acceptance require separate approvals.
+
+### Private OKE access troubleshooting checkpoint (2026-11-18)
+
+The existing branch remains `feature/SCRUM-122-deploy-kubernetes-to-processing`
+at `6db5c95`. No branch was created. The current local kubeconfig is
+`~/.kube/studyforge-oke-bastion`; it points to loopback `127.0.0.1:16443`,
+verifies TLS with server name `10.0.1.9`, and invokes OCI exec credentials with
+profile `studyforge-scrum122-local`. The helper targets the private API
+`10.0.1.9:6443`, uses the dedicated Bastion SSH key and pinned host key, and
+will only reuse an ACTIVE Bastion session. The default Kubernetes context was
+not changed.
+
+Both OCI profiles initially reported `Session has expired` under local-only
+validation. The kubeconfig invokes the secondary `studyforge-scrum122-local`
+profile, while the earlier successful reauthentication applied only to the
+primary profile. The secondary profile was then reauthenticated through OCI's
+browser flow using the public key derived from its already configured private
+key. The existing private key and profile signing key were preserved; CLI
+reported the secondary session valid until 2026-11-18 18:49:30. No credential
+contents were displayed.
+
+Read-only Bastion inventory found the existing `studyforge-oke-local-access`
+Bastion ACTIVE at `10.0.1.235` with client allowlist `24.155.68.96/32`. Its
+three recorded sessions, including the helper's previous approved session ID,
+were all `DELETED`; each targeted `10.0.1.9:6443`. The SSH public-key fingerprint matches
+the recorded dedicated key, and the pinned Bastion host-key fingerprint matches
+the recorded value. These checks found no key or host-key mismatch. The prior
+connection failed because the kubeconfig's OCI profile was expired and the
+time-limited Bastion session had been deleted; there was consequently no active
+SSH tunnel to the private OKE API. The user confirmed current workstation SSH
+egress `24.155.68.96/32`, matching the active Bastion allowlist. The subsequent
+successful SSH connection independently confirmed that this source was
+allowed. No third-party IP-discovery service was used.
+
+With the user's approval, one 3,600-second `PORT_FORWARDING` session was
+created on the existing Bastion, targeting `10.0.1.9:6443` with the existing
+dedicated public key. No Bastion, subnet, NSG, route, or allowlist was changed.
+OCI confirmed the session ACTIVE and its target correct. The SSH helper opened
+only `127.0.0.1:16443`; the dedicated kubeconfig connected successfully and
+the node query returned `Ready=True`, `kubernetes.io/arch=arm64` for node
+`10.0.1.63` (Oracle Linux Server 8.10, Kubernetes `v1.35.2`). The helper-managed
+local tunnel was stopped immediately after verification; the PID file was
+removed and `lsof` confirmed port 16443 has no listener. The temporary Bastion
+session was deleted after the check; OCI status reached `DELETED`. No OKE
+resources, network rules, or unrelated services were changed.
+
+### Phase 2 build and publication checkpoint (2026-11-18)
+
+The current source remains on the existing branch
+`feature/SCRUM-122-deploy-kubernetes-to-processing`, HEAD `6db5c95`.
+Service code, Dockerfile, requirements, `.dockerignore`, tests, and
+`.github/workflows/processing-arm64.yml` were reviewed. No code change was
+needed for ARM64 build compatibility. `python:3.12-slim` is a multi-architecture
+base, the previous native local build verified `linux/arm64`, runtime UID is
+10001, and the context excludes `.env`, virtualenvs, Python bytecode, and pytest
+cache. `requirements.txt` has a duplicate `packaging==25.0` entry; it is
+redundant but did not block the prior build and was left unchanged.
+
+Current local Docker is unavailable: `open -Ra Docker` reported Docker Desktop
+not installed, `~/.docker/run` is empty, and `docker info` cannot find the
+socket. No reinstall or permissions change was attempted. The current
+checkpoint reran `actionlint` on the publishing workflow and ShellCheck on the
+Bastion helper; both passed. The latest recorded Python service tests remain
+71 passed, 3 skipped, and 14 subtests; the full disposable worker harness and
+explicit `linux/arm64` local build passed in the preceding checkpoint.
+
+The existing workflow uses `ubuntu-24.04-arm`, checks `uname -m` is `aarch64`,
+checks for `OCIR_USERNAME` and `OCIR_AUTH_TOKEN`, targets `linux/arm64`, and
+pushes to `phx.ocir.io/axcyydnoof5f/studyforge/document-processing`. [GitHub's
+hosted-runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
+lists `ubuntu-24.04-arm` for public and private repositories. GitHub mirror
+access and both required secret names were verified before dispatch.
+
+With the user's explicit approval, the missing feature ref was created in
+`Sanish25/studyforge-arm64-build` using a normal non-force push at the exact
+source SHA. Secret names `OCIR_USERNAME` and `OCIR_AUTH_TOKEN` were present;
+values were not accessed. Workflow run `44434934736` completed successfully
+from SHA `6db5c95eb415d5407061140903998a4f8ec56be3`. The native runner check,
+secret-presence checks, OCIR login, build/push, pull, architecture verification,
+and digest comparison all passed. The runner reported `aarch64`; the pulled
+image reported `linux/arm64`.
+
+| Publication record | Verified value |
+|---|---|
+| Tag | `arm64-6db5c95eb415d5407061140903998a4f8ec56be3-44434934736-1` |
+| Buildx digest | `sha256:c07d7b5d5fd4b089f65617733e100f0f062cd76122fe10366c3496b0f14858f6` |
+| Pulled registry digest | `sha256:c07d7b5d5fd4b089f65617733e100f0f062cd76122fe10366c3496b0f14858f6` |
+| Platform | `linux/arm64` |
+| Immutable image | `phx.ocir.io/axcyydnoof5f/studyforge/document-processing@sha256:c07d7b5d5fd4b089f65617733e100f0f062cd76122fe10366c3496b0f14858f6` |
+
+The workflow emitted a non-blocking Node.js 20 deprecation annotation for its
+current action versions (they were forced to Node.js 24). The job still
+completed successfully; action-version maintenance is follow-up work. No
+Kubernetes deployment or production service change was performed. The worker
+manifest is now locally pinned to this verified digest for Phase 3 review; it
+has not been applied.
+
+### Phase 3 access and manifest verification (2026-11-18)
+
+- `studyforge-scrum122-local` initially reported an expired session. The
+  documented browser reauthentication completed, and local validation reported
+  the OCI session valid until `2026-11-18 20:25:05`. The local connection
+  refusal was caused by the deleted Bastion forwards and absent SSH listener;
+  the helper later reported the tunnel up on `127.0.0.1:16443`.
+- Before creation, authenticated read-only inventory found four historical
+  port-forward sessions, all `DELETED`; the existing Bastion was `ACTIVE` with
+  allowlist `24.155.68.96/32`. With explicit user approval, one new
+  3,600-second session was created to `10.0.1.9:6443` using the existing SSH
+  public key. Session `ocid1.bastionsession.oc1.phx.amaaaaaatvvdeaaa74jx5rjeqbht5fcg6qmeyjixglim73da653hbekkodta`
+  reached `ACTIVE` with the intended target. No allowlist, network rule, or
+  other cloud resource was changed.
+- `scripts/scrum122-oke-connect.sh start <session-id>` opened the pinned-host
+  SSH forward and its API check reported `OKE nodes Ready=1/1`. Live node
+  inventory confirmed `10.0.1.63 Ready=True arm64 v1.35.2`. Namespace
+  `studyforge` was `Active` and contained only pod/deployment/service for the
+  frontend, `kube-root-ca.crt`, `ocir-pull-secret`, and the default
+  ServiceAccount.
+- The existing pull secret was type `kubernetes.io/dockerconfigjson`, with key
+  `.dockerconfigjson`; parsing was in memory and output only the registry host
+  `phx.ocir.io`. Credential values were not displayed. Worker dependencies
+  were absent: ConfigMaps `studyforge-processing-worker`,
+  `studyforge-processing-runtime`, `studyforge-processing-trust`, Secret
+  `studyforge-processing-secrets`, and ServiceAccount `processing-worker`.
+- `yq eval-all -o=json` parsed all three manifest documents. Strict
+  `kubeconform -strict -summary -kubernetes-version 1.35.2` passed all three
+  resources (Valid 3, Invalid 0, Errors 0). Static inspection confirmed digest
+  `sha256:c07d7b5d5fd4b089f65617733e100f0f062cd76122fe10366c3496b0f14858f6`,
+  ARM64 scheduling, worker ServiceAccount and pull-secret references, envFrom
+  ConfigMap and Secret key references, startup/readiness/liveness probes, and
+  requests 250m CPU/512Mi with limits 1 CPU/1Gi.
+- `kubectl apply --dry-run=server --validate=strict --field-manager=scrum122-phase3-validation
+  -f services/document-processing/oke-worker.yaml` returned `created (server
+  dry run)` for the ServiceAccount, ConfigMap and Deployment. Follow-up reads
+  confirmed each remained absent. No resources were applied.
+- Cleanup completed: the helper stopped the local tunnel, port `16443` had no
+  listener, and OCI reported the temporary session state `DELETED`. No
+  Kubernetes or production resources/configuration changed. The live dry-run
+  validates API admission only; it does not validate absent runtime Secrets,
+  ConfigMaps, dependency connectivity, or successful image pull.

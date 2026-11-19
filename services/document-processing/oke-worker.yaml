@@ -71,8 +71,8 @@ spec:
           type: RuntimeDefault
       containers:
         - name: processing-worker
-          # Draft only. Substitute the verified OCIR linux/arm64 digest before applying.
-          image: phx.ocir.io/axcyydnoof5f/studyforge/document-processing@sha256:REPLACE_WITH_APPROVED_DIGEST
+          # Published linux/arm64 image verified in SCRUM-122 Phase 2.
+          image: phx.ocir.io/axcyydnoof5f/studyforge/document-processing@sha256:c07d7b5d5fd4b089f65617733e100f0f062cd76122fe10366c3496b0f14858f6
           imagePullPolicy: IfNotPresent
           command:
             - /bin/sh
