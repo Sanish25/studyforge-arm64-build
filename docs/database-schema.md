@@ -1,9 +1,12 @@
 # Database Schema
 
-User, Course, StudySession, Document, and Job have model definitions. DocumentChunk and Note remain planned relationships. SCRUM-9 adds persistence only, not upload or processing behavior.
+User, Course, StudySession, Document, Job, Conversation, and ConversationMessage have model definitions. DocumentChunk and Note remain planned relationships. SCRUM-9 adds persistence only, not upload or processing behavior.
 
 ```text
 User
+ │
+ ├── 1:N Conversation
+ │    └── 1:N ConversationMessage
  │
  │ 1:N
  ▼
@@ -14,7 +17,8 @@ Course
  │    ├── Job (1:N)
  │    ├── DocumentChunk
  │    └── Note
- └── 1:N StudySession
+ ├── 1:N StudySession
+ └── 1:N Conversation (optional course link)
 ```
 
 ## Agreed relationship names
@@ -28,6 +32,9 @@ Course
 | `Job.document` | The document for one logical processing run |
 | `DocumentChunk.document` | The document a chunk was extracted from |
 | `Note.document` | The document a note was generated for |
+| `Conversation.owner` | The user who owns the conversation |
+| `Conversation.course` | Optional course link for course chat; null means standalone |
+| `ConversationMessage.conversation` | The conversation a message belongs to; ownership follows that conversation's owner |
 
 ## Common fields
 

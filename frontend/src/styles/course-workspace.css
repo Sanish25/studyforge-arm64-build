@@ -129,7 +129,17 @@
 .course-workspace .chat-prompts button:hover:not(:disabled) { border-color: #c9c5ea; background: #f8f7ff; }
 .chat-message { max-width: 90%; padding: .7rem .8rem; border: 1px solid #ececf2; border-radius: .9rem; margin-bottom: .65rem; background: #fff; overflow-wrap: anywhere; }
 .chat-message p { white-space: pre-wrap; margin-top: .25rem; font-size: .82rem; }
-.chat-message strong { font-size: .7rem; }
+.chat-message > strong { font-size: .7rem; }
+.chat-markdown { margin-top: .25rem; font-size: .82rem; line-height: 1.45; overflow-wrap: anywhere; }
+.chat-markdown > :first-child { margin-top: 0; }
+.chat-markdown > :last-child { margin-bottom: 0; }
+.chat-markdown p, .chat-markdown ul, .chat-markdown ol, .chat-markdown pre, .chat-markdown blockquote { margin: .4rem 0; }
+.chat-markdown ul, .chat-markdown ol { padding-left: 1.2rem; }
+.chat-markdown code { padding: .05rem .28rem; border-radius: .25rem; background: #f3f1fa; font-size: .78rem; }
+.chat-markdown pre { padding: .55rem .65rem; border-radius: .55rem; background: #f6f5fb; overflow: auto; }
+.chat-markdown pre code { padding: 0; background: transparent; font-size: .76rem; }
+.chat-markdown .katex { font-size: 1.05em; }
+.chat-markdown .katex-display { margin: .55rem 0; overflow-x: auto; overflow-y: hidden; }
 .chat-message-user { margin-left: auto; border-color: #e6e1fa; background: #f4f1ff; }
 .chat-message-assistant { margin-right: auto; }
 .chat-citation { margin-top: .55rem; font-size: .7rem !important; text-align: left; }

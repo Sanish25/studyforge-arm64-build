@@ -25,7 +25,7 @@ class GeminiJSONClient:
         self.client = genai.Client(
             api_key=key, vertexai=False,
             http_options=types.HttpOptions(
-                timeout=timeout, retry_options=types.HttpRetryOptions(attempts=2),
+                timeout=timeout, retry_options=types.HttpRetryOptions(attempts=3),
             ),
         )
 

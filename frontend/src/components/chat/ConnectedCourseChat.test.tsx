@@ -1,9 +1,10 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import ConnectedCourseChat from "./ConnectedCourseChat";
+import { askPanduAgent, type PanduAgentReply } from "../../api/agent";
 import { DocumentRequestError } from "../../api/documents";
 import {
-  QuestionRequestError, askConversationQuestion, createCourseConversation, deleteConversation, deleteConversationUpload,
+  createCourseConversation, deleteConversation, deleteConversationUpload,
   getConversationUpload, listConversationMessages, listConversationUploads, listConversations, retryConversationQuestion,
   uploadConversationDocument, type Conversation, type ConversationMessage, type QuestionCitation, type QuestionResult, type ToolTraceEntry,
 } from "../../api/conversations";
@@ -12,11 +13,12 @@ import { fetchSourceFile } from "../../api/sourceFiles";
 // Mutable so a test can refresh the access token while the chat stays mounted.
 const auth = vi.hoisted(() => ({ user: { id: 1 }, accessToken: "token" }));
 vi.mock("../../context/AuthContext", () => ({ useAuth: () => auth }));
+vi.mock("../../api/agent", () => ({ askPanduAgent: vi.fn() }));
 vi.mock("../../api/conversations", async (original) => ({
   // Keep the real error class so instanceof checks behave as in production.
   QuestionRequestError: (await original<typeof import("../../api/conversations")>()).QuestionRequestError,
   listConversations: vi.fn(), createCourseConversation: vi.fn(), listConversationUploads: vi.fn(), listConversationMessages: vi.fn(),
-  getConversationUpload: vi.fn(), uploadConversationDocument: vi.fn(), askConversationQuestion: vi.fn(), retryConversationQuestion: vi.fn(),
+  getConversationUpload: vi.fn(), uploadConversationDocument: vi.fn(), retryConversationQuestion: vi.fn(),
   deleteConversation: vi.fn(), deleteConversationUpload: vi.fn(),
 }));
 vi.mock("../../api/sourceFiles", () => ({ fetchSourceFile: vi.fn() }));
@@ -25,10 +27,12 @@ const SESSION = "studyforge:course-chat:1:42";
 const thread = (id: number, title = "", courseId = 42) => ({ id, course_id: courseId, title, created_at: "2026-11-16", updated_at: "2026-11-16T10:00:00Z" });
 const question = (id: number, content: string, status: "ANSWERED" | "FAILED" | "PENDING" = "ANSWERED"): ConversationMessage =>
   ({ id, role: "user", status, content, citations: [], tool_trace: [], reply_to: null, created_at: "2026-11-16" });
-const reply = (id: number, replyTo: number, content: string, extra: { citations?: QuestionCitation[]; tool_trace?: ToolTraceEntry[] } = {}): ConversationMessage =>
-  ({ id, role: "assistant", status: "ANSWERED", content, citations: extra.citations ?? [], tool_trace: extra.tool_trace ?? [], reply_to: replyTo, created_at: "2026-11-16" });
+const reply = (id: number, replyTo: number, content: string, extra: { citations?: QuestionCitation[]; tool_trace?: ToolTraceEntry[]; status?: "ANSWERED" | "INSUFFICIENT_CONTEXT" } = {}): ConversationMessage =>
+  ({ id, role: "assistant", status: extra.status ?? "ANSWERED", content, citations: extra.citations ?? [], tool_trace: extra.tool_trace ?? [], reply_to: replyTo, created_at: "2026-11-16" });
 const answered = (q: ConversationMessage, r: ConversationMessage): QuestionResult =>
   ({ status: "ANSWERED", answer: r.content, citations: r.citations, tool_trace: r.tool_trace, question: q, reply: r });
+const envelope = (text: string, status: PanduAgentReply["status"] = "ok"): PanduAgentReply =>
+  ({ type: "message", status, text, citations: [], tool_trace: [] });
 const cite = (documentId: number, page: number, name: string | null, format: "pdf" | "pptx" | "docx" | null, available = true): QuestionCitation =>
   ({ chunk_id: documentId * 10, document_id: documentId, page_number: page, excerpt: `Evidence ${documentId}`, document_name: name, source_format: format, available });
 const material = (id: number, courseId: number, name: string, status = "READY") => ({ id, name, snapshot: {
@@ -43,6 +47,13 @@ function deferred<T>() {
   let resolve!: (value: T) => void; let reject!: (cause: unknown) => void;
   const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
   return { promise, resolve, reject };
+}
+/** Agent persists then the UI reloads history — seed both in the mock. */
+function mockAgentTurn(conversationId: number, q: ConversationMessage, r: ConversationMessage, text = r.content || "I couldn’t find enough information in the selected references to answer that question.") {
+  vi.mocked(askPanduAgent).mockImplementationOnce(async () => {
+    history[conversationId] = [...(history[conversationId] ?? []), q, r];
+    return envelope(text, r.status === "INSUFFICIENT_CONTEXT" ? "abstain" : "ok");
+  });
 }
 let history: Record<number, ConversationMessage[]>;
 
@@ -59,7 +70,7 @@ beforeEach(() => {
   vi.mocked(listConversationUploads).mockReset().mockImplementation(async (id) => id === 9 ? [upload(13, 9, "Chat.docx")] : []);
   vi.mocked(getConversationUpload).mockReset().mockResolvedValue(upload(13, 9, "Chat.docx"));
   vi.mocked(uploadConversationDocument).mockReset();
-  vi.mocked(askConversationQuestion).mockReset();
+  vi.mocked(askPanduAgent).mockReset();
   vi.mocked(retryConversationQuestion).mockReset();
   vi.mocked(deleteConversation).mockReset().mockResolvedValue(undefined);
   vi.mocked(deleteConversationUpload).mockReset().mockResolvedValue(undefined);
@@ -124,14 +135,14 @@ it("switches chats and never shows a slower earlier load in the newer chat", asy
 it("cancels an in-flight reply when switching chats; the saved answer appears only back in its own chat", async () => {
   render(<ConnectedCourseChat courseId={42} materials={[material(1, 42, "Lecture.pdf")]} />);
   await ready();
-  const pending = deferred<QuestionResult>();
+  const pending = deferred<PanduAgentReply>();
   let signal!: AbortSignal;
-  vi.mocked(askConversationQuestion).mockImplementation((_id, _text, _ids, _token, nextSignal) => { signal = nextSignal; return pending.promise; });
+  vi.mocked(askPanduAgent).mockImplementation((_body, _token, nextSignal) => { signal = nextSignal; return pending.promise; });
   await sendQuestion("Late question");
   fireEvent.click(threadButton("Osmosis"));
   expect(signal.aborted).toBe(true);
   await ready("Water moves.");
-  await act(async () => pending.resolve(answered(question(5, "Late question"), reply(6, 5, "Late answer"))));
+  await act(async () => pending.resolve(envelope("Late answer")));
   expect(screen.queryByText("Late answer")).not.toBeInTheDocument();
   expect(screen.queryByText("Late question")).not.toBeInTheDocument();
   // The server still finished and saved it; going back reloads it from history.
@@ -147,7 +158,7 @@ it("keeps a chat created while the list refresh is in flight, even though the se
   await ready();
   const staleList = deferred<Conversation[]>();
   vi.mocked(listConversations).mockReturnValueOnce(staleList.promise);
-  vi.mocked(askConversationQuestion).mockResolvedValueOnce(answered(question(5, "Mitosis phases?"), reply(6, 5, "Four phases.")));
+  mockAgentTurn(9, question(5, "Mitosis phases?"), reply(6, 5, "Four phases."));
   await sendQuestion("Mitosis phases?");
   await screen.findByText("Four phases.");
   // The refresh is waiting; meanwhile the student starts a new chat, which is saved.
@@ -159,7 +170,7 @@ it("keeps a chat created while the list refresh is in flight, even though the se
   expect(within(chats()).getByRole("button", { current: true })).toHaveTextContent("New chat");
   // It is not stuck: the next refresh brings the server's title for it.
   vi.mocked(listConversations).mockResolvedValueOnce([thread(12, "First question here"), thread(9, "Cells"), thread(10, "Osmosis")]);
-  vi.mocked(askConversationQuestion).mockResolvedValueOnce(answered(question(7, "First question here"), reply(8, 7, "Fresh answer.")));
+  mockAgentTurn(12, question(7, "First question here"), reply(8, 7, "Fresh answer."));
   await sendQuestion("First question here");
   await screen.findByText("Fresh answer.");
   await waitFor(() => expect(threadNames()).toEqual(["First question here", "Cells", "Osmosis"]));
@@ -169,7 +180,7 @@ it("drops a chat the server no longer lists, such as one deleted in another tab"
   render(<ConnectedCourseChat courseId={42} materials={[material(1, 42, "Lecture.pdf")]} />);
   await ready();
   vi.mocked(listConversations).mockResolvedValueOnce([thread(9, "Cells")]);
-  vi.mocked(askConversationQuestion).mockResolvedValueOnce(answered(question(5, "Q"), reply(6, 5, "A.")));
+  mockAgentTurn(9, question(5, "Q"), reply(6, 5, "A."));
   await sendQuestion("Q");
   await screen.findByText("A.");
   await waitFor(() => expect(threadNames()).toEqual(["Cells"]));
@@ -179,16 +190,23 @@ it("refreshes the list with the latest token when the token was refreshed during
   const view = <ConnectedCourseChat courseId={42} materials={[material(1, 42, "Lecture.pdf")]} />;
   const { rerender } = render(view);
   await ready();
-  const pending = deferred<QuestionResult>();
-  vi.mocked(askConversationQuestion).mockReturnValueOnce(pending.promise);
+  const pending = deferred<PanduAgentReply>();
+  vi.mocked(askPanduAgent).mockReturnValueOnce(pending.promise);
   await sendQuestion("Long one");
   auth.accessToken = "refreshed-token";
   rerender(<ConnectedCourseChat courseId={42} materials={[material(1, 42, "Lecture.pdf")]} />);
-  await act(async () => pending.resolve(answered(question(5, "Long one"), reply(6, 5, "Finally."))));
+  await act(async () => {
+    history[9] = [...history[9], question(5, "Long one"), reply(6, 5, "Finally.")];
+    pending.resolve(envelope("Finally."));
+  });
   await screen.findByText("Finally.");
   await waitFor(() => expect(vi.mocked(listConversations).mock.lastCall?.[0]).toBe("refreshed-token"));
   // The question itself went out with the token current at the time.
-  expect(askConversationQuestion).toHaveBeenCalledWith(9, "Long one", [1], "token", expect.any(AbortSignal));
+  expect(askPanduAgent).toHaveBeenCalledWith(
+    { message: "Long one", course_id: 42, conversation_id: 9, document_ids: [1] },
+    "token",
+    expect.any(AbortSignal),
+  );
 });
 
 it("ignores an older list refresh that finishes after a newer one", async () => {
@@ -197,9 +215,8 @@ it("ignores an older list refresh that finishes after a newer one", async () => 
   const older = deferred<Conversation[]>();
   const newer = deferred<Conversation[]>();
   vi.mocked(listConversations).mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise);
-  vi.mocked(askConversationQuestion)
-    .mockResolvedValueOnce(answered(question(5, "First"), reply(6, 5, "One.")))
-    .mockResolvedValueOnce(answered(question(7, "Second"), reply(8, 7, "Two.")));
+  mockAgentTurn(9, question(5, "First"), reply(6, 5, "One."));
+  mockAgentTurn(9, question(7, "Second"), reply(8, 7, "Two."));
   await sendQuestion("First");
   await screen.findByText("One.");
   await sendQuestion("Second");
@@ -262,8 +279,8 @@ it("shows one error, not a reload error too, when deleting the open chat fails w
 it("reloads the open chat when a failed delete had cancelled a send, so its question shows as saved", async () => {
   render(<ConnectedCourseChat courseId={42} materials={[material(1, 42, "Lecture.pdf")]} />);
   await ready();
-  const pending = deferred<QuestionResult>();
-  vi.mocked(askConversationQuestion).mockReturnValueOnce(pending.promise);
+  const pending = deferred<PanduAgentReply>();
+  vi.mocked(askPanduAgent).mockReturnValueOnce(pending.promise);
   vi.mocked(deleteConversation).mockRejectedValue(new DocumentRequestError(503, { code: "UNAVAILABLE", message: "Deletion is unavailable right now." }));
   await sendQuestion("Cancelled question");
   // The server saved the question; the browser stopped waiting when the delete started.
@@ -273,7 +290,7 @@ it("reloads the open chat when a failed delete had cancelled a send, so its ques
   expect(await screen.findByText("Deletion is unavailable right now.")).toBeInTheDocument();
   expect(await screen.findByRole("button", { name: "Retry" })).toBeInTheDocument();
   expect(screen.getAllByText("Cancelled question")).toHaveLength(1);
-  await act(async () => pending.resolve(answered(question(5, "Cancelled question"), reply(6, 5, "Ghost answer"))));
+  await act(async () => pending.resolve(envelope("Ghost answer")));
   expect(screen.queryByText("Ghost answer")).not.toBeInTheDocument();
 });
 
@@ -290,9 +307,9 @@ it("treats a 404 on delete as already deleted and removes the chat", async () =>
 it("cancels the reply in flight before deleting the active chat, so it can never appear", async () => {
   render(<ConnectedCourseChat courseId={42} materials={[material(1, 42, "Lecture.pdf")]} />);
   await ready();
-  const pending = deferred<QuestionResult>();
+  const pending = deferred<PanduAgentReply>();
   let signal!: AbortSignal;
-  vi.mocked(askConversationQuestion).mockImplementation((_id, _text, _ids, _token, nextSignal) => { signal = nextSignal; return pending.promise; });
+  vi.mocked(askPanduAgent).mockImplementation((_body, _token, nextSignal) => { signal = nextSignal; return pending.promise; });
   let abortedWhenDeleting: boolean | undefined;
   vi.mocked(deleteConversation).mockImplementation(async () => { abortedWhenDeleting = signal.aborted; });
   await sendQuestion("Doomed question");
@@ -300,7 +317,7 @@ it("cancels the reply in flight before deleting the active chat, so it can never
   fireEvent.click(within(screen.getByRole("group", { name: "Delete Cells?" })).getByRole("button", { name: "Delete" }));
   await ready("Water moves.");
   expect(abortedWhenDeleting).toBe(true);
-  await act(async () => pending.resolve(answered(question(5, "Doomed question"), reply(6, 5, "Ghost answer"))));
+  await act(async () => pending.resolve(envelope("Ghost answer")));
   expect(screen.queryByText("Ghost answer")).not.toBeInTheDocument();
 });
 
@@ -321,13 +338,19 @@ it("shows an empty state after the last chat is deleted instead of creating one"
 // --- Sending, failures and retries ----------------------------------------------------------
 
 it("keeps a failed question with a retry that re-answers it without a duplicate", async () => {
-  vi.mocked(askConversationQuestion).mockRejectedValue(new QuestionRequestError(503, {
-    code: "RAG_GENERATION_FAILED", detail: "The question could not be answered right now. Please try again.", question: question(5, "Explain diffusion", "FAILED"),
-  }));
+  vi.mocked(askPanduAgent).mockImplementation(async () => {
+    history[9] = [...history[9], question(5, "Explain diffusion", "FAILED")];
+    throw new DocumentRequestError(503, {
+      code: "UPLOAD_UNAVAILABLE",
+      message: "The question could not be answered right now. Please try again.",
+    });
+  });
   render(<ConnectedCourseChat courseId={42} materials={[material(1, 42, "Lecture.pdf")]} />);
   await ready();
   await sendQuestion("Explain diffusion");
   expect(await screen.findByText("The question could not be answered right now. Please try again.")).toBeInTheDocument();
+  // Retry needs serverId from the reloaded FAILED question (local bubble has none yet).
+  expect(await screen.findByRole("button", { name: "Retry" })).toBeInTheDocument();
   expect(screen.getByText("Pandu didn’t answer this question.")).toBeInTheDocument();
   vi.mocked(retryConversationQuestion).mockResolvedValue(answered(question(5, "Explain diffusion"), reply(6, 5, "Particles spread out.")));
   fireEvent.click(screen.getByRole("button", { name: "Retry" }));
@@ -338,20 +361,22 @@ it("keeps a failed question with a retry that re-answers it without a duplicate"
 });
 
 it("reloads the saved history when the outcome of a send is unknown", async () => {
-  vi.mocked(askConversationQuestion).mockRejectedValue(new Error("offline"));
+  vi.mocked(askPanduAgent).mockImplementation(async () => {
+    history[9] = [...history[9], question(5, "Lost?", "FAILED")];
+    throw new Error("offline");
+  });
   render(<ConnectedCourseChat courseId={42} materials={[material(1, 42, "Lecture.pdf")]} />);
   await ready();
   const loads = vi.mocked(listConversationMessages).mock.calls.length;
-  history[9] = [...history[9], question(5, "Lost?", "FAILED")];
   await sendQuestion("Lost?");
   expect(await screen.findByRole("alert")).toHaveTextContent("could not answer");
-  await waitFor(() => expect(vi.mocked(listConversationMessages).mock.calls.length).toBe(loads + 1));
+  await waitFor(() => expect(vi.mocked(listConversationMessages).mock.calls.length).toBeGreaterThan(loads));
   expect(await screen.findByRole("button", { name: "Retry" })).toBeInTheDocument();
   expect(screen.getAllByText("Lost?")).toHaveLength(1);
 });
 
 it("stops waiting for a reply and reloads what the server saved", async () => {
-  vi.mocked(askConversationQuestion).mockImplementation(() => new Promise(() => {}));
+  vi.mocked(askPanduAgent).mockImplementation(() => new Promise(() => {}));
   render(<ConnectedCourseChat courseId={42} materials={[material(1, 42, "Lecture.pdf")]} />);
   await ready();
   await sendQuestion("Slow one");
@@ -370,18 +395,26 @@ it("shows a question still being answered in history, with a check-again action"
 });
 
 it("sends only the selected sources and shows the no-context reply in the same words after a refresh", async () => {
-  vi.mocked(askConversationQuestion).mockResolvedValue({ status: "INSUFFICIENT_CONTEXT", answer: null, citations: [], tool_trace: [],
-    question: question(5, "Unknown topic"), reply: { ...reply(6, 5, ""), status: "INSUFFICIENT_CONTEXT" } });
+  mockAgentTurn(
+    9,
+    question(5, "Unknown topic"),
+    reply(6, 5, "", { status: "INSUFFICIENT_CONTEXT" }),
+  );
   render(<ConnectedCourseChat courseId={42} materials={[material(1, 42, "Lecture.pdf"), material(99, 43, "Foreign.pdf")]} />);
   await ready();
   expect(screen.queryByText("Foreign.pdf")).not.toBeInTheDocument();
   fireEvent.change(screen.getByRole("textbox"), { target: { value: "Unknown topic" } });
-  expect(screen.getByRole("button", { name: "Send to Pandu" })).toBeDisabled();
+  // Sources optional for the agent; selection still scopes document_ids.
+  expect(screen.getByRole("button", { name: "Send to Pandu" })).toBeEnabled();
   fireEvent.click(screen.getByRole("button", { name: "Select all READY" }));
   fireEvent.click(screen.getByRole("button", { name: "Send to Pandu" }));
   expect(screen.getByRole("button", { name: "Send to Pandu" })).toBeDisabled();
   expect(await screen.findByText(/couldn’t find enough information/)).toBeInTheDocument();
-  expect(askConversationQuestion).toHaveBeenCalledWith(9, "Unknown topic", [1, 13], "token", expect.any(AbortSignal));
+  expect(askPanduAgent).toHaveBeenCalledWith(
+    { message: "Unknown topic", course_id: 42, conversation_id: 9, document_ids: [1, 13] },
+    "token",
+    expect.any(AbortSignal),
+  );
 });
 
 // --- Tools used and citations (criteria 4, 5, 6) -----------------------------------------

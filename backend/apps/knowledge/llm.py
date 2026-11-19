@@ -171,6 +171,21 @@ def _unique_object(pairs):
     return result
 
 
+def _uncited_answer(payload):
+    """Keep a grounded ANSWERED body when citations fail exact-match checks."""
+    if not isinstance(payload, dict):
+        return None
+    answer = payload.get("answer")
+    if (
+        payload.get("status") != "ANSWERED"
+        or not isinstance(answer, str)
+        or not answer.strip()
+        or len(answer) > MAX_ANSWER_CHARS
+    ):
+        return None
+    return {"status": "ANSWERED", "answer": answer.strip(), "citations": []}
+
+
 class OpenAIRAGLLM:
     """Dedicated OpenAI text client; SDK client injection avoids real API calls."""
 
@@ -187,7 +202,7 @@ class OpenAIRAGLLM:
             raise RAGProviderError("RAG generation is not configured.")
         self._client = OpenAI(api_key=key, timeout=30.0, max_retries=1)
 
-    def generate(self, question, passages):
+    def generate(self, question, passages, *, allow_uncited=False):
         question, sources = _prepare(question, passages)
         if not sources:
             return {"status": "INSUFFICIENT_CONTEXT", "answer": None, "citations": []}
@@ -199,12 +214,20 @@ class OpenAIRAGLLM:
         try:
             return validate_answer(payload, sources)
         except InvalidCitation:
-            # Exactly one repair attempt; a second failure takes the normal error path.
+            # Exactly one repair attempt; a second failure takes the normal error path
+            # unless the caller allows a grounded answer without citations (SCRUM-23).
             messages = messages + [
                 {"role": "assistant", "content": raw},
                 {"role": "system", "content": CITATION_REPAIR_PROMPT},
             ]
-        return validate_answer(self._complete(messages)[1], sources)
+        raw, payload = self._complete(messages)
+        try:
+            return validate_answer(payload, sources)
+        except InvalidCitation:
+            salvaged = _uncited_answer(payload) if allow_uncited else None
+            if salvaged is not None:
+                return salvaged
+            raise
 
     def _complete(self, messages):
         try:
@@ -260,7 +283,8 @@ class FakeRAGLLM:
 
     name = "fake"
 
-    def generate(self, question, passages):
+    def generate(self, question, passages, *, allow_uncited=False):
+        del allow_uncited
         _prepare(question, passages)
         return {"status": "INSUFFICIENT_CONTEXT", "answer": None, "citations": []}
 

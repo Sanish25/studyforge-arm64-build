@@ -4,7 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import CourseWorkspace from "./CourseWorkspace";
 import type { CourseSection } from "./courseSections";
 import { listDocuments } from "../../api/documents";
-import { askConversationQuestion, listConversations, listConversationUploads, type QuestionResult } from "../../api/conversations";
+import { askPanduAgent, type PanduAgentReply } from "../../api/agent";
+import { listConversations, listConversationMessages, listConversationUploads } from "../../api/conversations";
 import { generateNotes, getNotes } from "../../api/notes";
 import { generateQuiz, getQuiz } from "../../api/quizzes";
 import { DEFAULT_NOTES_OPTIONS, type CourseNotes } from "../../types/notes";
@@ -12,13 +13,25 @@ import type { Quiz } from "../../types/quiz";
 
 vi.mock("../../context/AuthContext", () => ({ useAuth: () => ({ user: { id: 1 }, accessToken: "token" }) }));
 vi.mock("../../api/documents", async (original) => ({ ...await original<typeof import("../../api/documents")>(), listDocuments: vi.fn().mockResolvedValue([]) }));
-vi.mock("../../api/conversations", () => ({ listConversations: vi.fn().mockResolvedValue([{ id: 9, course_id: 42, title: "", created_at: "2026-10-01", updated_at: "2026-10-01" }]), listConversationUploads: vi.fn().mockResolvedValue([]), listConversationMessages: vi.fn().mockResolvedValue([]), askConversationQuestion: vi.fn() }));
+vi.mock("../../api/agent", () => ({ askPanduAgent: vi.fn() }));
+vi.mock("../../api/conversations", () => ({
+  listConversations: vi.fn().mockResolvedValue([{ id: 9, course_id: 42, title: "", created_at: "2026-10-01", updated_at: "2026-10-01" }]),
+  listConversationUploads: vi.fn().mockResolvedValue([]),
+  listConversationMessages: vi.fn().mockResolvedValue([]),
+}));
 vi.mock("../../api/quizzes", async (original) => ({ ...await original<typeof import("../../api/quizzes")>(), generateQuiz: vi.fn(), getQuiz: vi.fn(), getQuizResults: vi.fn(), submitQuiz: vi.fn() }));
 vi.mock("../../api/notes", async (original) => ({ ...await original<typeof import("../../api/notes")>(), generateNotes: vi.fn(), getNotes: vi.fn() }));
-// SCRUM-24: answers carry the saved question and reply.
-const noContext: QuestionResult = { status: "INSUFFICIENT_CONTEXT", answer: null, citations: [], tool_trace: [],
-  question: { id: 1, role: "user", status: "ANSWERED", content: "What is osmosis?", citations: [], tool_trace: [], reply_to: null, created_at: "2026-10-01" },
-  reply: { id: 2, role: "assistant", status: "INSUFFICIENT_CONTEXT", content: "", citations: [], tool_trace: [], reply_to: 1, created_at: "2026-10-01" } };
+const agentAbstain: PanduAgentReply = {
+  type: "message",
+  status: "abstain",
+  text: "I couldn’t find enough information in the selected references to answer that question.",
+  citations: [],
+  tool_trace: [],
+};
+const savedNoContext = [
+  { id: 1, role: "user" as const, status: "ANSWERED" as const, content: "What is osmosis?", citations: [], tool_trace: [], reply_to: null, created_at: "2026-10-01" },
+  { id: 2, role: "assistant" as const, status: "INSUFFICIENT_CONTEXT" as const, content: "", citations: [], tool_trace: [], reply_to: 1, created_at: "2026-10-01" },
+];
 const course = { id: 42, name: "Biology", description: "Cell biology", owner: 1, created_at: "2026-10-01" };
 
 afterEach(() => { vi.unstubAllGlobals(); sessionStorage.clear(); });
@@ -121,9 +134,9 @@ it("keeps the draft and an in-flight real reply while Pandu is hidden", async ()
     id: 81, course_id: 42, name: "Lecture.pdf", status: "READY", error: null,
     created_at: "2026-10-01", updated_at: "2026-10-01",
   }]);
-  let finish!: (result: QuestionResult) => void;
+  let finish!: (result: PanduAgentReply) => void;
   let questionSignal!: AbortSignal;
-  vi.mocked(askConversationQuestion).mockImplementationOnce((_id, _question, _ids, _token, signal) => {
+  vi.mocked(askPanduAgent).mockImplementationOnce((_body, _token, signal) => {
     questionSignal = signal;
     return new Promise((resolve) => { finish = resolve; });
   });
@@ -133,7 +146,11 @@ it("keeps the draft and an in-flight real reply while Pandu is hidden", async ()
   const message = screen.getByLabelText("Message Pandu");
   fireEvent.change(message, { target: { value: "What is osmosis?" } });
   fireEvent.click(screen.getByRole("button", { name: "Send to Pandu" }));
-  expect(askConversationQuestion).toHaveBeenCalledWith(9, "What is osmosis?", [81], "token", questionSignal);
+  expect(askPanduAgent).toHaveBeenCalledWith(
+    { message: "What is osmosis?", course_id: 42, conversation_id: 9, document_ids: [81] },
+    "token",
+    questionSignal,
+  );
   fireEvent.change(message, { target: { value: "Unsent follow-up" } });
 
   const toggle = screen.getByRole("button", { name: "AI Assistant" });
@@ -141,7 +158,10 @@ it("keeps the draft and an in-flight real reply while Pandu is hidden", async ()
   fireEvent.click(toggle);
   expect(assistant).toHaveAttribute("inert");
   expect(questionSignal.aborted).toBe(false);
-  await act(async () => finish(noContext));
+  await act(async () => {
+    vi.mocked(listConversationMessages).mockResolvedValueOnce(savedNoContext);
+    finish(agentAbstain);
+  });
   expect(within(assistant!).getByText(/find enough information/)).toBeInTheDocument();
   fireEvent.click(toggle);
 
@@ -311,7 +331,11 @@ it("keeps sent Pandu messages and replies through Back and Forward", async () =>
     id: 81, course_id: 42, name: "Lecture.pdf", status: "READY", error: null,
     created_at: "2026-10-01", updated_at: "2026-10-01",
   }]);
-  vi.mocked(askConversationQuestion).mockResolvedValueOnce(noContext);
+  vi.mocked(askPanduAgent).mockImplementationOnce(async () => {
+    // After the agent persists, the UI reloads history — serve the saved Q+A then.
+    vi.mocked(listConversationMessages).mockResolvedValueOnce(savedNoContext);
+    return agentAbstain;
+  });
   renderWorkspace();
   const assistant = document.getElementById("course-assistant")!;
   fireEvent.click(await within(assistant).findByRole("checkbox", { name: /Lecture.pdf/ }));

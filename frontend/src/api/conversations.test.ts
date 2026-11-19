@@ -93,6 +93,38 @@ it("retries a saved question by id, loads history, and deletes threads and uploa
   expect(fetch.mock.calls[0][1].body).toBe(JSON.stringify({ document_ids: [13] }));
 });
 
+it("loads history that mixes SCRUM-24 traces with agent citations and tool_trace", async () => {
+  const agentReply = {
+    id: 58,
+    role: "assistant",
+    status: "ANSWERED",
+    content: "A regular expression denotes a regular language.",
+    citations: [{ chunk_id: 239, document_id: 43, page: 3 }],
+    tool_trace: [
+      { name: "ask_course_question", status: "error" },
+      { name: "retrieve_chunks", ok: true },
+      { name: "answer_from_sources", status: "error" },
+    ],
+    reply_to: 56,
+    created_at: "2026-11-18",
+  };
+  const agentQuestion = {
+    id: 56, role: "user", status: "ANSWERED", content: "explain me about regular expression",
+    citations: [], tool_trace: [], reply_to: null, created_at: "2026-11-18",
+  };
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json([agentQuestion, agentReply])));
+  const loaded = await listConversationMessages(20, "token", new AbortController().signal);
+  expect(loaded).toHaveLength(2);
+  expect(loaded[1].citations[0]).toMatchObject({
+    chunk_id: 239, document_id: 43, page_number: 3, excerpt: "", available: true, source_format: null,
+  });
+  expect(loaded[1].tool_trace).toEqual([
+    { name: "ask_course_question", ok: false },
+    { name: "retrieve_chunks", ok: true },
+    { name: "answer_from_sources", ok: false },
+  ]);
+});
+
 it("reports a failed deletion with the server's status instead of pretending it worked", async () => {
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ code: "RESOURCE_NOT_FOUND", message: "Resource not found." }, { status: 404 })));
   const error = await deleteConversation(9, "token", new AbortController().signal).catch((cause: unknown) => cause);

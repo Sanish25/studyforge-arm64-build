@@ -1,7 +1,10 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useId, useRef, useState } from "react";
 import type { ChatMessage, CourseChatProps } from "../../types/chat";
 import ChatThreads from "./ChatThreads";
 import { reconcileSelection, selectAllReferences, selectedDocumentIds, toggleReference } from "./chatReferences";
+
+/** Markdown + KaTeX are heavy; load only when an assistant bubble renders. */
+const ChatMarkdown = lazy(() => import("./ChatMarkdown"));
 
 function PanduLogo({ size }: { size: "small" | "large" }) {
   return (
@@ -18,7 +21,11 @@ type MessageActions = { onRetryMessage?: CourseChatProps["onRetryMessage"]; onRe
 export function ChatMessageView({ message, onCitation, streaming = false, onRetryMessage, onReloadHistory, busy }: { message: ChatMessage; onCitation: CourseChatProps["onCitation"]; streaming?: boolean } & MessageActions) {
   return <article className={`chat-message chat-message-${message.role}`} aria-busy={streaming || message.state === "sending"}>
     <strong>{message.role === "user" ? "You" : "Pandu"}</strong>
-    <p>{message.text}{streaming && <span className="chat-streaming-cursor" aria-hidden="true" />}</p>
+    {message.role === "assistant"
+      ? <Suspense fallback={<p>{message.text}{streaming && <span className="chat-streaming-cursor" aria-hidden="true" />}</p>}>
+          <ChatMarkdown text={message.text} streaming={streaming} />
+        </Suspense>
+      : <p>{message.text}{streaming && <span className="chat-streaming-cursor" aria-hidden="true" />}</p>}
     {message.state === "failed" && <div className="chat-message-state">
       <span>Pandu didn’t answer this question.</span>
       {onRetryMessage && message.serverId !== undefined && <button type="button" disabled={busy} onClick={() => onRetryMessage(message)}>Retry</button>}
@@ -96,7 +103,8 @@ export default function CourseChat(props: CourseChatProps) {
   const showWelcome = !props.messages.length && !noThread && !props.historyLoading && !props.historyError;
   useEffect(() => { if (log.current) log.current.scrollTop = log.current.scrollHeight; }, [props.messages, props.status]);
   function send() {
-    if (!draft.trim() || busy || !documentIds.length || props.chatReady === false) return;
+    // Sources optional: agent clarifies when a material question needs them.
+    if (!draft.trim() || busy || props.chatReady === false) return;
     props.onSend(draft.trim(), documentIds); setDraft("");
   }
   const prompts = ["Summarize selected materials", "Explain a concept", "Generate practice questions"];
@@ -139,7 +147,7 @@ export default function CourseChat(props: CourseChatProps) {
       <textarea id={inputId} rows={1} value={draft} placeholder="Ask Pandu a question…" onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => {
         if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); send(); }
       }} />
-      <button className="chat-send" aria-label={props.demo ? "Send to Pandu (demo)" : "Send to Pandu"} disabled={!draft.trim() || busy || !documentIds.length || props.chatReady === false} type="submit">↑</button>
+      <button className="chat-send" aria-label={props.demo ? "Send to Pandu (demo)" : "Send to Pandu"} disabled={!draft.trim() || busy || props.chatReady === false} type="submit">↑</button>
     </form>
   </aside>;
 }

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { askPanduAgent } from "../../api/agent";
 import {
-  QuestionRequestError, askConversationQuestion, createCourseConversation, deleteConversation, deleteConversationUpload,
+  QuestionRequestError, createCourseConversation, deleteConversation, deleteConversationUpload,
   getConversationUpload, listConversationMessages, listConversationUploads, listConversations, retryConversationQuestion,
   uploadConversationDocument, type Conversation, type ConversationUpload, type QuestionResult,
 } from "../../api/conversations";
@@ -239,16 +240,52 @@ function ConnectedChat({ courseId, materials, token, userId }: { courseId: numbe
     } finally { if (!controller.signal.aborted) { pendingUpload.current = null; setUploading(false); } }
   }
 
-  // Shared by new questions and retries. `bubble` is the message being answered.
-  async function answer(bubble: (message: ChatMessage) => boolean, run: (conversation: number, signal: AbortSignal) => Promise<QuestionResult>) {
+  // Reload saved history after the agent (or retry) finishes. DB is source of truth.
+  async function loadSavedMessages(conversation: number, signal: AbortSignal) {
+    const saved = await listConversationMessages(conversation, tokenRef.current, signal);
+    if (signal.aborted || activeRef.current !== conversation) return;
+    setMessages(saved.map(toChatMessage));
+  }
+
+  // New asks go through POST /agent/pandu/ (persists + returns the JSON envelope).
+  async function askViaAgent(localId: string, text: string, ids: number[]) {
+    const conversation = activeRef.current;
+    if (!conversation) return;
+    const controller = new AbortController(); pendingQuestion.current = controller;
+    setStatus("sending"); setError("");
+    try {
+      await askPanduAgent(
+        {
+          message: text,
+          course_id: courseId,
+          conversation_id: conversation,
+          document_ids: ids,
+        },
+        tokenRef.current,
+        controller.signal,
+      );
+      if (controller.signal.aborted || activeRef.current !== conversation) return;
+      await loadSavedMessages(conversation, controller.signal);
+      if (controller.signal.aborted || activeRef.current !== conversation) return;
+      setStatus("idle");
+      void refreshThreads();
+    } catch (cause) {
+      if (controller.signal.aborted || activeRef.current !== conversation) return;
+      setError(problem(cause, "Pandu could not answer right now. Please try again."));
+      setStatus("error");
+      setMessages((current) => current.map((item) => item.id === localId ? { ...item, state: "failed" } : item));
+      reloadHistory();
+    } finally { if (pendingQuestion.current === controller) pendingQuestion.current = null; }
+  }
+
+  // Retries still use the conversation messages retry route (same saved question).
+  async function answerRetry(bubble: (message: ChatMessage) => boolean, run: (conversation: number, signal: AbortSignal) => Promise<QuestionResult>) {
     const conversation = activeRef.current;
     if (!conversation) return;
     const controller = new AbortController(); pendingQuestion.current = controller;
     setStatus("sending"); setError("");
     try {
       const result = await run(conversation, controller.signal);
-      // Aborted (thread switched, deleted or stopped) or no longer the active thread:
-      // never write this reply into whatever thread is showing now.
       if (controller.signal.aborted || activeRef.current !== conversation) return;
       setMessages((current) => replaceMessage(current, bubble, [result.question, result.reply]));
       setStatus("idle");
@@ -262,7 +299,6 @@ function ConnectedChat({ courseId, materials, token, userId }: { courseId: numbe
         setMessages((current) => replaceMessage(current, bubble, [question]));
         void refreshThreads();
       } else {
-        // Unknown outcome (network, 404, 409): the saved history is the truth.
         setMessages((current) => current.map((item) => bubble(item) ? { ...item, state: "failed" } : item));
         reloadHistory();
       }
@@ -270,12 +306,13 @@ function ConnectedChat({ courseId, materials, token, userId }: { courseId: numbe
   }
 
   function ask(text: string, ids: number[]) {
-    if (pendingQuestion.current || !activeRef.current || !text.trim() || !ids.length || ids.length > 20) return;
+    // Sources optional: agent clarifies when materials are required.
+    if (pendingQuestion.current || !activeRef.current || !text.trim() || ids.length > 20) return;
     const eligible = selectedDocumentIds(references, selected);
     if (ids.some((id) => !eligible.includes(id))) return;
     const localId = `local-${++sequence.current}`;
     setMessages((current) => [...current, { id: localId, role: "user", text, state: "sending" }]);
-    void answer((item) => item.id === localId, (conversation, signal) => askConversationQuestion(conversation, text, ids, token, signal));
+    void askViaAgent(localId, text, ids);
   }
 
   function retry(message: ChatMessage) {
@@ -285,7 +322,7 @@ function ConnectedChat({ courseId, materials, token, userId }: { courseId: numbe
     if (!ids.length) { setError("Select at least one source, then retry."); setStatus("error"); return; }
     const isQuestion = (item: ChatMessage) => item.role === "user" && item.serverId === messageId;
     setMessages((current) => current.map((item) => isQuestion(item) ? { ...item, state: "sending" } : item));
-    void answer(isQuestion, (conversation, signal) => retryConversationQuestion(conversation, messageId, ids, token, signal));
+    void answerRetry(isQuestion, (conversation, signal) => retryConversationQuestion(conversation, messageId, ids, token, signal));
   }
 
   function stop() {

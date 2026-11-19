@@ -54,6 +54,7 @@ INSTALLED_APPS = [
     "apps.documents.apps.DocumentsConfig",
     "apps.notes",
     "apps.quizzes.apps.QuizzesConfig",
+    "apps.agent.apps.AgentConfig",
 ]
 AUTH_USER_MODEL = "users.User"
 MIDDLEWARE = [

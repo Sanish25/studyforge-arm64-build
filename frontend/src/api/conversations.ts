@@ -14,7 +14,14 @@ export type QuestionCitation = {
   document_name: string | null; source_format: SourceFormat | null; available: boolean;
 };
 export type SourceUse = { documents_searched: number; passages_used: number };
-export type ToolTraceEntry = { tool: string; sources?: { course_materials?: SourceUse; chat_uploads?: SourceUse } };
+/** SCRUM-24 search_sources trace from the conversations ask path. */
+export type SearchToolTraceEntry = {
+  tool: string;
+  sources?: { course_materials?: SourceUse; chat_uploads?: SourceUse };
+};
+/** Agent loop trace from POST /agent/pandu/ (and persisted assistant rows). */
+export type AgentToolTraceEntry = { name: string; ok: boolean };
+export type ToolTraceEntry = SearchToolTraceEntry | AgentToolTraceEntry;
 export type ConversationMessage = {
   id: number; role: "user" | "assistant";
   status: "PENDING" | "ANSWERED" | "FAILED" | "INSUFFICIENT_CONTEXT";
@@ -58,23 +65,72 @@ function upload(value: unknown): ConversationUpload {
 }
 const FORMATS = ["pdf", "docx", "pptx"];
 function citation(value: unknown): QuestionCitation {
-  if (!record(value) || !positive(value.chunk_id) || !positive(value.document_id) || !positive(value.page_number) ||
-    typeof value.excerpt !== "string" || typeof value.available !== "boolean" ||
-    (value.document_name !== null && typeof value.document_name !== "string") ||
-    (value.source_format !== null && !FORMATS.includes(String(value.source_format)))) {
+  if (!record(value) || !positive(value.document_id)) {
     throw new Error("The server returned an invalid citation.");
   }
-  return value as QuestionCitation;
+
+  // Described SCRUM-24 citation (page_number + excerpt present) — validate strictly.
+  if (positive(value.chunk_id) && positive(value.page_number) && typeof value.excerpt === "string") {
+    if (
+      typeof value.available !== "boolean" ||
+      (value.document_name !== null && value.document_name !== undefined && typeof value.document_name !== "string") ||
+      (value.source_format !== null && value.source_format !== undefined && !FORMATS.includes(String(value.source_format)))
+    ) {
+      throw new Error("The server returned an invalid citation.");
+    }
+    return {
+      chunk_id: value.chunk_id,
+      document_id: value.document_id,
+      page_number: value.page_number,
+      excerpt: value.excerpt,
+      document_name: typeof value.document_name === "string" ? value.document_name : null,
+      source_format: value.source_format === null || value.source_format === undefined
+        ? null
+        : value.source_format as SourceFormat,
+      available: value.available,
+    };
+  }
+
+  // Agent / partial citation (SCRUM-23: empty or incomplete citations are allowed).
+  const page = positive(value.page_number) ? value.page_number
+    : positive(value.page) ? value.page
+    : 1;
+  const format = value.source_format !== null && value.source_format !== undefined
+    && FORMATS.includes(String(value.source_format))
+    ? value.source_format as SourceFormat
+    : null;
+  return {
+    chunk_id: positive(value.chunk_id) ? value.chunk_id : value.document_id,
+    document_id: value.document_id,
+    page_number: page,
+    excerpt: typeof value.excerpt === "string" ? value.excerpt
+      : typeof value.text === "string" ? value.text : "",
+    document_name: typeof value.document_name === "string" ? value.document_name : null,
+    source_format: format,
+    available: typeof value.available === "boolean" ? value.available : true,
+  };
 }
 function sourceUse(value: unknown) {
   return record(value) && Number.isSafeInteger(value.documents_searched) && Number.isSafeInteger(value.passages_used);
 }
 function toolEntry(value: unknown): ToolTraceEntry {
-  if (!record(value) || typeof value.tool !== "string" || (value.sources !== undefined &&
-    (!record(value.sources) || !Object.values(value.sources).every(sourceUse)))) {
+  if (!record(value)) {
     throw new Error("The server returned an invalid tool trace.");
   }
-  return value as ToolTraceEntry;
+  // SCRUM-24 search_sources (and similar) traces.
+  if (typeof value.tool === "string") {
+    if (value.sources !== undefined &&
+      (!record(value.sources) || !Object.values(value.sources).every(sourceUse))) {
+      throw new Error("The server returned an invalid tool trace.");
+    }
+    return value as SearchToolTraceEntry;
+  }
+  // Agent loop [{ name, ok }] — also accept status: "ok" | "error" from older rows.
+  if (typeof value.name === "string" && value.name.trim()) {
+    const ok = value.ok === true || value.status === "ok";
+    return { name: value.name, ok };
+  }
+  throw new Error("The server returned an invalid tool trace.");
 }
 const QUESTION_STATUSES = ["PENDING", "ANSWERED", "FAILED"];
 const REPLY_STATUSES = ["ANSWERED", "INSUFFICIENT_CONTEXT"];
