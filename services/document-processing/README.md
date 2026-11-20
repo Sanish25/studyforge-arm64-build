@@ -34,7 +34,9 @@ makes the backend's Gemini and processing service settings available for
 interpolation. Set a long random `PROCESSING_SERVICE_TOKEN` in `backend/.env`;
 Django and the worker containers must receive the same value. Django does not
 load `backend/.env` automatically: export that token into the backend process
-environment (or configure it in the backend's deployment environment) before
+environment (or configure it in the b
+docker compose --env-file backend/.env -f docker-compose.yml -f docker-compose.processing.yml up -d --build document-processing processing-worker-1 processing-worker-2
+docker compose --env-file backend/.env -f docker-compose.yml -f docker-compose.processing.yml ps -aackend's deployment environment) before
 starting Django. For a host-run backend, use `python manage.py runserver
 0.0.0.0:8000` from `backend` after exporting its settings. The worker
 services are passed only the Gemini settings, processing token, internal Django
