@@ -239,33 +239,52 @@ When deploying SCRUM-101 to a VM that still has the former backend
 `sudo systemctl disable --now studyforge-celery`. Deploy and verify the standalone
 document-processing worker separately; restarting Gunicorn does not start it.
 
-## Planned: Bitbucket auto-deploy (after frontend)
+## Deploy script (preferred manual / CI entrypoint)
 
-**Defer until the frontend is deployed** (e.g. Vercel) and CORS/CSRF origins are
-set. Then automate the same steps via **Bitbucket Pipelines** (team source of
-truth for merge), not by hand.
+Repo script: [`scripts/deploy-oci.sh`](../../scripts/deploy-oci.sh)
 
-Intended shape:
+Same steps as the manual ritual above. Run **on the VM**:
+
+```bash
+ssh -i ~/.ssh/studyforge-oci.key ubuntu@<PUBLIC_IP>
+cd ~/studyforge && git pull
+bash scripts/deploy-oci.sh
+```
+
+Or from your laptop in one shot (streams the script over SSH):
+
+```bash
+ssh -i ~/.ssh/studyforge-oci.key ubuntu@132.226.88.147 'bash -s' < scripts/deploy-oci.sh
+```
+
+Optional env overrides: `STUDYFORGE_ROOT`, `STUDYFORGE_ENV_FILE`,
+`STUDYFORGE_HEALTH_URL`, `STUDYFORGE_DEPLOY_BRANCH` (checkout that branch before pull).
+
+**Frontend is separate:** Vercel auto-deploys the React app. This script only
+updates Django on OCI.
+
+## Bitbucket auto-deploy (blocked while Pipeline minutes are exhausted)
+
+Intended shape (when the workspace has Bitbucket Pipeline minutes again):
 
 ```text
-merge to deploy branch (main or development — configurable)
+merge to deploy branch (development or main — configurable)
   → Bitbucket Pipeline: tests pass
   → deploy step SSHs into studyforge-api
-  → runs pull / pip / migrate / collectstatic / restart
+  → runs scripts/deploy-oci.sh
   → smoke health check
 ```
 
-What we will need later:
+| Piece | Role | Status |
+|-------|------|--------|
+| `scripts/deploy-oci.sh` | Pull / pip / migrate / collectstatic / restart | **In repo** |
+| Deploy branch choice | Only that branch triggers deploy | Decide with team (`development` after SCRUM-126 merges) |
+| Bitbucket Repository variables (secured) | SSH private key, host, user — **never in git** | Not configured yet |
+| VM `authorized_keys` + limited sudo | Allow CI to restart Gunicorn only | Manual SSH key already works for humans |
+| Pipeline minutes | Free-tier build minutes required for Pipelines | **Team currently exhausted** — use laptop/SSH script until reset |
 
-| Piece | Role |
-|-------|------|
-| Deploy branch choice | Only that branch triggers deploy (`main` preferred; can switch) |
-| `scripts/deploy-oci.sh` (or equivalent) | Same commands as the manual ritual |
-| Bitbucket Repository variables / Secured variables | SSH private key, host, user — **never in git** |
-| VM `authorized_keys` + limited sudo | Allow CI to restart Gunicorn only |
-| Post-frontend CORS | Vercel origin already in `/etc/studyforge.env` before auto-deploy matters for browsers |
-
-Until that pipeline exists, continue using the manual SSH flow above.
+Until Pipelines can run again, use the SSH + `deploy-oci.sh` flow. Do **not**
+rely on Bitbucket for OCI deploys while minutes are zero.
 
 ## Document-processing microservice (how it can be deployed)
 
@@ -291,8 +310,8 @@ API is sketched). Keep `PROCESSING_SERVICE_TOKEN` aligned between Django
 
 | Item | Notes |
 |------|--------|
-| Frontend on Vercel | Set `CORS_ALLOWED_ORIGINS` / `CSRF_TRUSTED_ORIGINS` in `/etc/studyforge.env` to the Vercel HTTPS origin; restart Gunicorn |
-| Bitbucket auto-deploy | Pipeline SSH deploy of the manual steps; **after frontend**; branch configurable |
+| Frontend on Vercel | Done (SCRUM-126); keep CORS/CSRF origins aligned with the live Vercel URL |
+| Bitbucket auto-deploy | Script ready; enable Pipeline SSH step when minutes return + secured vars set |
 | Document-processing worker | Production path TBD (OCI VM vs K8s); local kind path already in `docs/kind-local-worker.md` |
 | `packaging` | Explicit in `backend/requirements.txt` for the Django Celery publisher's Redis transport |
 
@@ -366,3 +385,4 @@ may 404 after Certbot; use the DuckDNS Host header or the public HTTPS URL.
 | 2026-11-12 | Env-driven DEBUG/SECRET_KEY/ALLOWED_HOSTS/CORS/CSRF/STATIC_ROOT/secure cookies; gunicorn dep |
 | 2026-11-13 | Marked cutover done; DuckDNS HTTPS URL; `/etc/studyforge.env` access docs; iptables; Celery; packaging in requirements; manual vs Bitbucket auto-deploy; processing microservice deploy options |
 | 2026-11-13 | Renamed runbook to `backend-oracle-deployment.md` | Clearer deploy-doc name; SCRUM-125 still in title |
+| 2026-11-20 | Added `scripts/deploy-oci.sh`; Bitbucket auto-deploy deferred on free-tier minutes | Frontend on Vercel; API still SSH/script deploy until Pipelines have minutes |

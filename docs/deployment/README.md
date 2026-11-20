@@ -9,8 +9,16 @@ entries over rewriting history.
 
 | File | Purpose |
 |------|---------|
-| [backend-oracle-deployment.md](./backend-oracle-deployment.md) | SCRUM-125: Django backend, Postgres + pgvector, and Redis on Oracle OCI |
+| [frontend-vercel-deployment.md](./frontend-vercel-deployment.md) | SCRUM-126: React/Vite on Vercel, `/api` proxy, env, Google OAuth, CI/CD, troubleshooting |
+| [backend-oracle-deployment.md](./backend-oracle-deployment.md) | SCRUM-125: Django backend, Postgres + pgvector, and Redis on Oracle OCI (+ `scripts/deploy-oci.sh`) |
 | [production-document-storage.md](./production-document-storage.md) | SCRUM-127: private object storage, service connections, cutover, and probes |
+
+## Frontend vs backend deploy
+
+| Layer | Host | How it updates |
+|-------|------|----------------|
+| React frontend | Vercel | Git push to the Vercel production branch → auto build/deploy |
+| Django API | OCI VM | `scripts/deploy-oci.sh` over SSH (Bitbucket Pipeline auto-deploy when minutes allow) |
 
 ## How to update
 
@@ -30,4 +38,5 @@ SSH, view/edit, and restart services. Never commit that file.
 - Local Postgres/Redis Compose: root [README.md](../../README.md)
 - Auth / cookie production notes: [authentication-design.md](../authentication-design.md)
 - Document processing worker (local kind): [kind-local-worker.md](../kind-local-worker.md)
+- Frontend Vercel deployment (SCRUM-126): [frontend-vercel-deployment.md](./frontend-vercel-deployment.md)
 - Backend Oracle deployment (manual + planned Bitbucket auto-deploy + processing options): [backend-oracle-deployment.md](./backend-oracle-deployment.md)
