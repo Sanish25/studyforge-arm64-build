@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { QuizQuestion } from "../../types/quiz";
 import type { SurvivalAnswerResult, SurvivalFeedback, SurvivalSession } from "../../types/survival";
+import SurvivalPanda from "./SurvivalPanda";
 import SurvivalHearts from "./SurvivalHearts";
 import "./survival.css";
 
@@ -50,10 +51,18 @@ export default function SurvivalGame({ session, feedback, answering, error, noti
   const pending = answering ? chosen : null;
   const headingRef = useRef<HTMLHeadingElement>(null);
   const continueRef = useRef<HTMLButtonElement>(null);
+  const reactionRef = useRef<HTMLDivElement>(null);
   const questionId = question?.id;
 
-  // The option that had focus is disabled after an answer: move to Continue, then to the next question.
-  useEffect(() => { if (feedback) continueRef.current?.focus(); }, [feedback]);
+  // Bring the panda and result into view together; focus Continue without letting
+  // the browser scroll past the animation to the bottom of the feedback panel.
+  useEffect(() => {
+    if (!feedback) return;
+    const reducedMotion = typeof window.matchMedia === "function"
+      && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    reactionRef.current?.scrollIntoView?.({ behavior: reducedMotion ? "auto" : "smooth", block: "start" });
+    continueRef.current?.focus({ preventScroll: true });
+  }, [feedback]);
   useEffect(() => { if (!feedback) headingRef.current?.focus(); }, [feedback, questionId]);
 
   if (!question) return <p role="alert">This game has no question to show. Reload the page to continue.</p>;
@@ -97,17 +106,21 @@ export default function SurvivalGame({ session, feedback, answering, error, noti
       })}
     </div>
 
-    {/* Always mounted so screen readers hear each result. */}
-    <p role="status" className="survival-sr-only">{announcement}</p>
+    <div ref={reactionRef} className="survival-answer-reaction">
+      <SurvivalPanda lives={session.lives} maxLives={session.max_lives} happy={result?.is_correct ?? false} onFinalLanding={onContinue} />
 
-    {result && <div className={`survival-feedback ${result.is_correct ? "survival-feedback-correct" : "survival-feedback-wrong"}`}>
-      <p className="survival-verdict">{described?.verdict}</p>
-      {described?.correctOption && <p className="survival-answer">The correct answer was <strong>{described.correctOption}</strong></p>}
-      {result.explanation && <p className="survival-explanation">{result.explanation}</p>}
-      <button ref={continueRef} type="button" className="survival-primary" onClick={onContinue}>
-        {session.status === "ACTIVE" ? "Next question" : "See results"}
-      </button>
-    </div>}
+      {/* Always mounted so screen readers hear each result. */}
+      <p role="status" className="survival-sr-only">{announcement}</p>
+
+      {result && <div className={`survival-feedback ${result.is_correct ? "survival-feedback-correct" : "survival-feedback-wrong"}`}>
+        <p className="survival-verdict">{described?.verdict}</p>
+        {described?.correctOption && <p className="survival-answer">The correct answer was <strong>{described.correctOption}</strong></p>}
+        {result.explanation && <p className="survival-explanation">{result.explanation}</p>}
+        {session.status !== "GAME_OVER" && <button ref={continueRef} type="button" className="survival-primary" onClick={onContinue}>
+          {session.status === "ACTIVE" ? "Next question" : "See results"}
+        </button>}
+      </div>}
+    </div>
 
     {error && <p role="alert" className="quiz-error">{error}</p>}
   </section>;

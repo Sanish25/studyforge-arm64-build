@@ -212,6 +212,66 @@ As development continues, StudyForge will be expanded through additional sprints
 
 ## Local setup
 
+### macOS: run the app locally
+
+Use three terminals from the repository root. Docker Compose runs PostgreSQL,
+Redis, and the document-processing workers; Django and Vite run directly on
+macOS.
+
+First, make sure ports `5432`, `8000`, and `5173` are available. Django expects
+port `8000`, and the frontend is configured to call that address. If another
+app uses one of these ports, stop that app or adjust the matching local port
+configuration before starting StudyForge.
+
+Before starting, create `backend/.env` from `backend/.env.example` if needed
+(`test -f backend/.env || cp backend/.env.example backend/.env`), then set a
+valid `GEMINI_API_KEY` and a long random `PROCESSING_SERVICE_TOKEN` in it. You
+can generate a token with `openssl rand -hex 32`.
+Use the same token for Django and the workers (Django loads `backend/.env`
+automatically). Make sure its `POSTGRES_DB`, `POSTGRES_USER`,
+`POSTGRES_PASSWORD`, and `POSTGRES_PORT` match your local Compose database; the
+defaults for a new local database are `studyforge`, `studyforge`,
+`studyforge_dev`, and `5432`. Do not commit this file.
+
+**Terminal 1 — database, Redis, and document workers:**
+
+```bash
+docker compose --env-file backend/.env -f docker-compose.yml -f docker-compose.processing.yml up -d --build document-processing processing-worker-1 processing-worker-2
+```
+
+This starts the database and Redis dependencies too. The Gemini key is required
+for workers to create embeddings; without it, workers can receive and extract a
+document but will fail before completing processing.
+
+**Terminal 2 — Django backend:**
+
+```bash
+cd backend
+source venv/bin/activate
+python manage.py migrate
+python manage.py runserver 0.0.0.0:8000
+```
+
+Use Python 3.12 for `backend/venv`. Django loads the settings in
+`backend/.env` automatically when it starts.
+
+**Terminal 3 — React frontend:**
+
+```bash
+cd frontend
+npm install
+test -f .env || cp .env.example .env
+npm run dev -- --host 127.0.0.1 --port 5173 --strictPort
+```
+
+Keep `VITE_API_BASE_URL=http://localhost:8000/api/v1` in `frontend/.env`. Open
+`http://localhost:5173`; Django's health endpoint is
+`http://localhost:8000/api/v1/health/`.
+
+If a port is already occupied, inspect it with `lsof -nP -iTCP:<port> -sTCP:LISTEN`.
+Vite's `--strictPort` makes startup fail clearly instead of silently moving to a
+port that may not be allowed by the backend's CORS settings.
+
 ### Backend
 
 ```bash
@@ -222,10 +282,10 @@ source venv/bin/activate
 
 pip install -r requirements.txt
 
-# Before the commands below, export the PostgreSQL connection variables
-# listed in backend/.env.example and start your local PostgreSQL database.
+# Start PostgreSQL first. Django loads backend/.env automatically when present;
+# otherwise its local database defaults match docker-compose.yml.
 python manage.py migrate
-python manage.py runserver
+python manage.py runserver 0.0.0.0:8000
 ```
 
 On Windows, activate the virtual environment with:
@@ -236,22 +296,9 @@ venv\Scripts\activate
 
 Use Python 3.12 for the backend. Database configuration uses `POSTGRES_DB`,
 `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_HOST`, and `POSTGRES_PORT` from
-the process environment. See `backend/.env.example` for the names and local
-defaults. Django does not automatically load `.env` files. Keep actual credentials
-in your local environment or ignored `.env` file; export them before running
-management commands. PostgreSQL, rather than SQLite, is required for SCRUM-9
-migration verification.
-
-If you keep local PostgreSQL values in `backend/.env`, load them into the current
-PowerShell session from the `backend` directory before running Django:
-
-```powershell
-foreach ($line in Get-Content .env) {
-    if ($line -match '^(POSTGRES_DB|POSTGRES_USER|POSTGRES_PASSWORD|POSTGRES_HOST|POSTGRES_PORT|CELERY_BROKER_URL|MEDIA_ROOT)=(.*)$') {
-        [Environment]::SetEnvironmentVariable($Matches[1], $Matches[2], 'Process')
-    }
-}
-```
+the process environment or the ignored `backend/.env` file, which Django loads
+automatically. See `backend/.env.example` for the variable names. PostgreSQL,
+rather than SQLite, is required for SCRUM-9 migration verification.
 
 ### Document upload API (SCRUM-10)
 

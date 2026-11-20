@@ -17,7 +17,7 @@ vi.mock("../../api/quizzes", async (original) => ({
   generateQuiz: vi.fn(), submitQuiz: vi.fn(), getQuiz: vi.fn(), getQuizResults: vi.fn(),
 }));
 
-afterEach(() => { vi.clearAllMocks(); sessionStorage.clear(); });
+afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); sessionStorage.clear(); });
 
 const doc = (id: number, name: string): TrackedDocument => ({
   id, name, snapshot: { id, course_id: 42, name, status: "READY", created_at: "", updated_at: "", error: null },
@@ -27,6 +27,7 @@ const savedKey = "studyforge:survival:1:42";
 
 const q1 = { id: 101, position: 1, text: "Which is last in, first out?", options: ["Stack", "Queue", "Tree", "Graph"] };
 const q2 = { id: 102, position: 2, text: "Which is first in, first out?", options: ["Stack", "Queue", "Tree", "Graph"] };
+const q3 = { id: 103, position: 3, text: "Which structure is hierarchical?", options: ["Stack", "Queue", "Tree", "Graph"] };
 
 const state = (overrides: Partial<SurvivalSession> = {}): SurvivalSession => ({
   id: 7, quiz_id: 9, course: 42, status: "ACTIVE", lives: 3, max_lives: 3, score: 0,
@@ -52,6 +53,7 @@ it("starts a Survival game from the course quiz setup with 3 lives and score 0",
   await startGame();
   expect(startSurvival).toHaveBeenCalledWith(42, [1], 5, "tok", expect.any(AbortSignal));
   expect(screen.getByRole("img", { name: "3 of 3 lives left" })).toBeVisible();
+  expect(screen.getByRole("img", { name: "Pandu standing with 3 lives left" })).toHaveAttribute("data-fall-level", "0");
   expect(score()).toHaveTextContent("Score: 0");
   expect(screen.getByText("Question 1 of 5")).toBeVisible();
   expect(screen.getByRole("progressbar", { name: "Game progress" })).toHaveAttribute("value", "0");
@@ -69,6 +71,7 @@ it("shows the server's new score after a correct answer, then the next question"
   expect(screen.getByRole("img", { name: "3 of 3 lives left" })).toBeVisible();
   expect(screen.getByRole("progressbar", { name: "Game progress" })).toHaveAttribute("value", "1");
   expect(screen.getByRole("status")).toHaveTextContent("Correct. Your score is 1.");
+  expect(screen.getByRole("img", { name: "Pandu celebrates with 3 lives left" })).toHaveClass("survival-panda-happy");
   expect(screen.queryByText(/^The correct answer was/)).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: /Stack/ })).toHaveClass("survival-option-correct");
 
@@ -94,8 +97,35 @@ it("shows a lost life, the correct option and the explanation after a wrong answ
   expect(screen.getByText(/^The correct answer was/)).toHaveTextContent("The correct answer was A. Stack");
   expect(screen.getByRole("status")).toHaveTextContent("Wrong answer. You lost a life. 2 of 3 left. The correct answer was A. Stack.");
   expect(document.querySelectorAll(".survival-heart-losing")).toHaveLength(1);
+  const panda = screen.getByRole("img", { name: "Pandu has fallen to level 1 with 2 lives left" });
+  expect(panda).toHaveAttribute("data-frame", "1");
+  expect(screen.getByRole("group", { name: "Answer options" }).compareDocumentPosition(panda))
+    .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  expect(document.querySelector(".survival-panda-frame-leaving")).toBeInTheDocument();
+  expect(document.querySelector(".survival-panda-frame-entering")).toBeInTheDocument();
   // Every option stays locked until the student moves on.
   for (const option of screen.getAllByRole("button", { name: /Stack|Queue|Tree|Graph/ })) expect(option).toBeDisabled();
+});
+
+it("moves the panda to the second fall level after the second wrong answer", async () => {
+  await startGame();
+  vi.mocked(answerSurvival)
+    .mockResolvedValueOnce(answered({ selected_option_index: 1, is_correct: false },
+      state({ lives: 2, current_position: 2, current_question: q2 })))
+    .mockResolvedValueOnce(answered({ question_id: 102, selected_option_index: 1, is_correct: false },
+      state({ lives: 1, current_position: 3, current_question: q3 })));
+
+  fireEvent.click(screen.getByRole("button", { name: "Queue" }));
+  await screen.findByText("Not quite. You lost a life.");
+  fireEvent.click(screen.getByRole("button", { name: "Next question" }));
+  expect(await screen.findByText(q2.text)).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Queue" }));
+
+  const panda = await screen.findByRole("img", { name: "Pandu has fallen to level 2 with 1 life left" });
+  expect(panda).toHaveAttribute("data-lives", "1");
+  expect(panda).toHaveAttribute("data-frame", "2");
+  expect(screen.getByRole("img", { name: "1 of 3 lives left" })).toBeVisible();
+  expect(document.querySelectorAll(".survival-heart-losing")).toHaveLength(1);
 });
 
 it("disables the options while an answer is being sent and sends it only once", async () => {
@@ -149,13 +179,26 @@ it("keeps the question and costs nothing when the answer is rejected as invalid"
 
 it("shows the last answer's feedback, then the game-over summary", async () => {
   await startGame();
+  vi.useFakeTimers();
   vi.mocked(answerSurvival).mockResolvedValue(answered({ selected_option_index: 1, is_correct: false },
     state({ status: "GAME_OVER", lives: 0, score: 1, current_position: 4, current_question: null, ended_at: "x" })));
   fireEvent.click(screen.getByRole("button", { name: "Queue" }));
 
-  expect(await screen.findByText("Out of lives!")).toBeVisible();
+  await act(async () => { await Promise.resolve(); });
+  expect(screen.getByText("Out of lives!")).toBeVisible();
   expect(screen.getByRole("img", { name: "0 of 3 lives left" })).toBeVisible();
-  fireEvent.click(screen.getByRole("button", { name: "See results" }));
+  const panda = screen.getByRole("img", { name: "Pandu falling to the ground after losing the final life" });
+  expect(panda).toHaveAttribute("data-fall-level", "3");
+  expect(panda).toHaveAttribute("data-frame", "2");
+  expect(document.querySelectorAll(".survival-heart-losing")).toHaveLength(1);
+  expect(screen.queryByRole("heading", { name: "Game over" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "See results" })).not.toBeInTheDocument();
+
+  await act(async () => { vi.advanceTimersByTime(900); });
+  expect(panda).toHaveAttribute("data-frame", "3");
+  expect(screen.queryByRole("heading", { name: "Game over" })).not.toBeInTheDocument();
+  await act(async () => { vi.advanceTimersByTime(300); });
+  expect(screen.getByRole("heading", { name: "Game over" })).toBeVisible();
 
   expect(screen.getByRole("heading", { name: "Game over" })).toHaveFocus();
   expect(screen.getByText(/^Final score:/)).toHaveTextContent("Final score: 1 out of 5");

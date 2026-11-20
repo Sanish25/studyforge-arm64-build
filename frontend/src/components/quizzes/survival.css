@@ -11,13 +11,15 @@
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  gap: 1rem;
+  gap: .75rem;
   width: 100%;
   max-width: 46rem;
   min-width: 0;
   margin: 0 auto;
   container-type: inline-size;
 }
+.survival { gap: .5rem; }
+.survival-summary { gap: 1rem; }
 
 /* Heads-up display: hearts on the left, score on the right; wraps on very narrow screens.
    Sticky so lives and score (and the lost-heart animation) stay in view when the
@@ -52,6 +54,63 @@
 .survival-heart-empty path, .survival-heart-losing path { fill: transparent; stroke: #c5c4db; }
 .survival-score { margin: 0; color: #26334d; font-size: 1.05rem; }
 .survival-score strong { display: inline-block; min-width: 1.5ch; font-size: 1.4rem; text-align: center; }
+
+/* The quiz mascot appears directly after the answer choices so feedback never requires scrolling back up. */
+.survival-answer-reaction { margin-top: -.5rem; scroll-margin-top: 5.5rem; }
+.survival-panda-track {
+  position: relative;
+  height: 15rem;
+  overflow: visible;
+  isolation: isolate;
+  background-color: #fff;
+}
+.survival-panda-motion {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  z-index: 1;
+  width: 8rem;
+  height: 10.667rem;
+  transform: translate(-50%, var(--rest-y, 0));
+  transform-origin: center bottom;
+}
+.survival-panda-frame {
+  position: absolute;
+  inset: 0;
+  background-repeat: no-repeat;
+  background-size: 400% 100%;
+}
+.survival-panda-frame-1,
+.survival-panda-frame-2,
+.survival-panda-frame-3 { transform: translateY(-32px); }
+.survival-panda-frame-leaving { animation: survival-panda-frame-out .24s ease-out both; }
+.survival-panda-frame-entering { animation: survival-panda-frame-in .24s ease-out both; }
+.survival-panda-level-0 { --rest-y: 0px; }
+.survival-panda-level-1 { --rest-y: 26px; animation: survival-panda-step-one .65s ease-in-out both; }
+.survival-panda-level-2 { --rest-y: 53px; animation: survival-panda-step-two .65s ease-in-out both; }
+.survival-panda-level-3 { --rest-y: 82px; animation: survival-panda-final-fall .9s cubic-bezier(.45, 0, .75, .5) both; }
+.survival-panda-level-0.survival-panda-happy,
+.survival-panda-level-1.survival-panda-happy,
+.survival-panda-level-2.survival-panda-happy { animation: survival-panda-happy-bounce .55s ease-in-out; }
+.survival-panda-ground {
+  position: absolute;
+  right: 0;
+  bottom: 2.5rem;
+  left: 0;
+  height: 1px;
+  background: #d8d4e4;
+}
+.survival-panda-ground::after {
+  position: absolute;
+  bottom: -.2rem;
+  left: 50%;
+  width: 6.5rem;
+  height: .45rem;
+  border-radius: 50%;
+  background: #26334d1c;
+  content: "";
+  transform: translateX(-50%);
+}
 
 .survival-progress p { margin: 0 0 .3rem; color: #707a91; font-size: .9rem; }
 .survival-progress progress { width: 100%; height: .55rem; accent-color: #5f52b5; }
@@ -194,6 +253,28 @@
 }
 @keyframes survival-heart-drain { 0%, 35% { fill: #e0465a; stroke: #e0465a; } 100% { fill: transparent; stroke: #c5c4db; } }
 @keyframes survival-rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes survival-panda-step-one {
+  0% { transform: translate(-50%, 0); }
+  42% { transform: translate(-50%, -8px) rotate(-5deg); }
+  100% { transform: translate(-50%, 26px); }
+}
+@keyframes survival-panda-step-two {
+  0% { transform: translate(-50%, 26px); }
+  38% { transform: translate(-50%, 19px) rotate(5deg); }
+  100% { transform: translate(-50%, 53px); }
+}
+@keyframes survival-panda-final-fall {
+  0% { transform: translate(-50%, 53px) rotate(0); }
+  58% { transform: translate(-50%, 44px) rotate(-9deg); }
+  100% { transform: translate(-50%, 82px) rotate(0); }
+}
+@keyframes survival-panda-happy-bounce {
+  0%, 100% { transform: translate(-50%, var(--rest-y, 0)); }
+  38% { transform: translate(-50%, calc(var(--rest-y, 0) - 14px)) rotate(-4deg); }
+  68% { transform: translate(-50%, calc(var(--rest-y, 0) + 2px)) rotate(4deg); }
+}
+@keyframes survival-panda-frame-out { from { opacity: 1; } to { opacity: 0; } }
+@keyframes survival-panda-frame-in { from { opacity: 0; } to { opacity: 1; } }
 
 /* The student's system asked for reduced motion: no animation at all, only the static result. */
 @media (prefers-reduced-motion: reduce) {
