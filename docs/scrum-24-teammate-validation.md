@@ -142,7 +142,7 @@ Also in scope: loading and error states when sending a message.
     `components/chat/chatHistory.test.ts` (new), `api/conversations.test.ts`,
     and mock updates in `components/courses/CourseWorkspace.test.tsx` and
     `pages/CourseDetailPage.test.tsx`.
-- Other: `.claude/skills/scrum-24-pandu-chat/SKILL.md`, the task's working notes
+- Other: `.claude/skills/scrum-25-pandu-voice-chat/SKILL.md`, the current Pandu chat working notes (including SCRUM-24 history)
   for AI-assisted sessions.
 
 ## Prerequisites

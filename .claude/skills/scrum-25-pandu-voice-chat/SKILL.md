@@ -1,9 +1,9 @@
 ---
-name: scrum-24-pandu-chat
-description: Shared context for SCRUM-24 (Pandu chat threads, tools used, clickable citations, history from the backend, deletion) in StudyForge, covering the acceptance criteria, agreed decisions (saving questions before answering, retry, 2-minute timeout, auto titles, search_sources tool trace, one authenticated file endpoint, citations described at response time, PDF at page and PPTX/DOCX download), the as-built backend API contract, the frontend plan, tests and mutation checks, pitfalls, follow-ups, and the Sprint 2 Git workflow. Use when working on apps/conversations, knowledge answer_question, the document file endpoint, readable_documents, ConnectedCourseChat, CourseChat, conversations.ts or chat types, or when committing, pushing, rebasing, or opening a PR for this task.
+name: scrum-25-pandu-voice-chat
+description: Shared context and handover for SCRUM-25 Pandu voice chat in StudyForge, including browser speech recognition, Gemini audio transcription fallback, answer playback, UI states, verification, and the earlier SCRUM-24 chat architecture. Use when working on CourseChat, ConnectedCourseChat, chatVoice, the voice API client, the Django voice endpoint, voice tests, or the SCRUM-25 branch and review.
 ---
 
-# SCRUM-24: Pandu chat threads, tools used and citations
+# SCRUM-25: Pandu voice chat and SCRUM-24 foundation
 
 ## Purpose
 
@@ -11,7 +11,7 @@ Keep durable task context available to the owner and teammates across sessions. 
 
 ## Start and end each session
 
-- Read this file and the latest SCRUM-24 acceptance criteria.
+- Read this file and the latest acceptance criteria for the active task. SCRUM-25 is the current handover; the SCRUM-24 notes below are historical context.
 - Inspect the branch, working tree and current code before editing (`git status`, `git log`, `git diff`). The owner often commits ahead of the plan; build on what is there.
 - At handoff, add newly learned durable context here: clarified criteria, agreed decisions, discoveries, pitfalls, verified progress. No secrets, tokens or personal data. Keep task notes in this file.
 
@@ -24,13 +24,52 @@ Keep durable task context available to the owner and teammates across sessions. 
 - Point out anything beyond the acceptance criteria before doing it.
 - Say what a test does not show.
 
-## Jira task
+## SCRUM-25 handover (November 19, 2026)
+
+### Task and acceptance criteria
+
+Branch: `feature/SCRUM-25-pandu-voice-chat`. Let students speak a question to Pandu, review and edit its transcript before sending, and play, pause, resume, or stop any text answer. A denied microphone or unavailable voice feature must show a clear message while ordinary typing and reading continue. The controls should work at different device sizes and across popular browsers.
+
+Acceptance criteria from the task:
+
+1. The student can click the microphone, speak a question, and see it converted to text.
+2. The converted text can be edited before sending.
+3. The student can play any Pandu answer aloud and stop it.
+4. If microphone access is denied, a clear message is shown and typing still works.
+5. Voice controls do not break normal text chat.
+
+The student asked for broad browser support using the existing Gemini API key, then chose a hybrid approach to reduce paid transcription calls. They also asked for an offline message and a more visible microphone button. These decisions supersede the early browser-only design discussed in the session.
+
+### As built: speech input and answer playback
+
+- `frontend/src/components/chat/CourseChat.tsx` prefers `SpeechRecognition` or `webkitSpeechRecognition`. Final recognized words are appended to the editable textarea; nothing is sent automatically. It sets the language from `navigator.language`, uses a single utterance, and does not show interim results.
+- If browser recognition is absent, or a prior attempt reports `network`, `service-not-allowed`, `language-not-supported`, or a startup failure, the next Mic click uses `navigator.mediaDevices.getUserMedia` and `MediaRecorder`. Recording auto-stops after 60 seconds; a recording over 5 MiB is rejected before upload. A browser service error does not silently start a paid Gemini request; the UI says to tap Mic again.
+- `frontend/src/components/chat/ConnectedCourseChat.tsx` passes the authenticated transcription callback. `frontend/src/api/voice.ts` sends one audio file as multipart form data to `POST /api/v1/voice/transcriptions/`. The returned text is placed in the same editable draft. The Gemini key stays on the backend. Recording is stopped and pending transcription is aborted when a chat changes or the component unmounts.
+- `backend/apps/conversations/voice.py` authenticates via `DocumentAPIView`, accepts one supported audio file up to 5 MiB, and calls the existing `google-genai` SDK with `GEMINI_API_KEY`. The default `GEMINI_VOICE_MODEL` is `gemini-2.5-flash` (`backend/.env.example`). It returns `{ "text": "..." }`, a 422 for an empty transcript, and a safe 503 for provider failures. It accepts WebM, Ogg, MP4/M4A (including Safari recording), MPEG, and WAV MIME types. The route is in `backend/apps/conversations/urls.py`.
+- Browser `speechSynthesis` reads each nonempty Pandu answer. Play, Pause, Resume, and Stop act on one answer at a time; switching answers cancels the prior utterance. This path makes no Django or Gemini text-to-speech call. If synthesis is absent, the page says read aloud is unsupported.
+- Microphone denial, missing microphone, unheard speech, recording/transcription failure, and unsupported voice input have readable messages. The microphone and Send controls are disabled when `navigator.onLine` reports offline, with a reconnect message; the draft stays editable. `navigator.onLine` is only a browser connectivity signal, not proof that the service is reachable. Sending also requires a selected READY source, a ready chat, and no active send; a visible hint explains the source requirement.
+- `frontend/src/styles/course-workspace.css` styles the Speak/Stop pill, recording state, keyboard focus, and reduced-motion mode. Responsive behavior still needs checks beyond the desktop browser result below.
+
+### Verification and current state
+
+- The SCRUM-25 implementation is committed on the branch: `ae6d31a` backend endpoint, `627a406` client, `7936052` chat UI and tests, and `0736f27` empty transcript/Safari tests. Keep the curiosity report and grade together in the final commit, after this handover and its related link update.
+- Full frontend verification passed: 641 tests across 59 files, TypeScript/production build, and lint with warnings only in unchanged files. Regression tests cover late transcripts, delayed microphone permission, and repeated Stop clicks; removing the corresponding fixes made the tests fail, and restoring the exact source made them pass again. Browser APIs are mocked, so this does not prove device layout, microphone hardware, or vendor speech service behavior.
+- Full backend verification passed using a disposable Docker database: 814 tests and 549 subtests, Django system checks, migration drift, and fresh migrations. The optional Docker S3 integration test was skipped. The standalone processing service also passed 91 tests and its system/migration checks. Python dependency consistency passed after installing the existing `moto[s3]` development dependency.
+- GitHub CI passed both jobs on the implementation/report tree before this documentation-only rename: [run 44481872893](https://github.com/sudinkatuwal7/studyforge-ci/actions/runs/44481872893). The separate SCRUM-25 validation file was removed at the owner's request.
+- A live probe with a synthetic tone found that `gemini-flash-latest` timed out while `gemini-2.5-flash` produced a transcript, leading to the current model default. This did not validate speech from a student's microphone.
+- The owner reports a passing manual browser test in desktop Chrome.
+- The SCRUM-25 curiosity report and grade are in `docs/ai-dev-reports/`.
+
+
+## SCRUM-24 background (historical context)
+
+### Jira task
 
 SCRUM-24, branch `feature/SCRUM-24-pandu-chat-threads-tools-citations`, created from `origin/development` (rebased onto SCRUM-22, c2415dd). Code review: Sanish (runs the branch locally, records a short walkthrough in docs/, requests changes before approving); then squashed into development.
 
 Scope: Pandu chat thread list (new, switch, delete); tools Pandu used per answer; clickable citations opening the source at the cited location; answers without citations display normally; loading and error states when sending; deletion wired to the backend API with no stale messages; history loaded from the backend; chat-upload deletion through the authorized API where exposed.
 
-## Acceptance criteria (Jira, word for word)
+### Acceptance criteria (Jira, word for word)
 
 1. The student can start a new conversation and see it in the thread list.
 2. Selecting a thread loads its earlier messages.
@@ -45,11 +84,11 @@ Scope: Pandu chat thread list (new, switch, delete); tools Pandu used per answer
 
 Agreed interpretation of 5: PDF opens at the cited page; PPTX shows "Slide N" and downloads (browsers cannot open a deck at a slide); DOCX has no location (see pitfalls) and downloads. Full "open at slide" needs PPTX-to-PDF conversion in the processing service; the owner is raising that with the team as a separate ticket or fix.
 
-## Blockers found at the start (all on development at 9b90c07)
+### Blockers found at the start (all on development at 9b90c07)
 
 SCRUM-75 (PR #77) was frontend-only and chose sessionStorage for messages. There was no message persistence, no tool data on answers, and no way to fetch a document's file. The owner chose to build all three on this ticket rather than split a backend ticket.
 
-## Team decisions (November 2026)
+### Team decisions (November 2026)
 
 History (blocker 1):
 - Save the question as PENDING before calling Pandu; a failure leaves it FAILED so a refresh still shows it. Pandu's reply is saved only on success, linked one-to-one to the question.
@@ -70,7 +109,7 @@ Opening sources (blocker 3):
 - One endpoint `GET /documents/{id}/file/` for course materials and chat uploads, since a citation only has `document_id`.
 - Citations are described when the response is built (current name, format, availability), not snapshotted.
 
-## Backend API contract (as built)
+### Backend API contract (as built)
 
 All conversation routes return 404 `{"code": "RESOURCE_NOT_FOUND", "message": "Resource not found."}` for foreign and missing IDs alike.
 
@@ -84,7 +123,7 @@ All conversation routes return 404 `{"code": "RESOURCE_NOT_FOUND", "message": "R
 - `GET /documents/{id}/file/` — PDF `inline`, DOCX/PPTX `attachment`, filename = title + extension (not doubled); `Cache-Control: no-store`, `nosniff`; 404 shared body; 401 `AUTHENTICATION_REQUIRED`; 503 `MATERIAL_UNAVAILABLE` if the stored file is missing.
 - `GET/DELETE /conversations/{id}/documents/{document_id}/` — chat uploads (existing).
 
-## Architecture (as built, backend)
+### Architecture (as built, backend)
 
 - `apps/conversations/models.py`: `ConversationMessage` (role, status, content, citations, tool_trace, reply_to one-to-one, created_at, attempted_at). Check constraint ties role, status, reply_to and attempted_at together. Index (conversation, created_at, id). Migrations 0002 (model), 0003 (tool_trace).
 - `apps/conversations/services.py`: `start_question`, `start_retry` (row lock), `mark_failed`, `save_answer` (row lock; accepts PENDING or FAILED; returns an existing reply), `shown_status`, `title_from_question`, `citation_sources` (one query through `readable_documents`), `PENDING_TIMEOUT`, `TITLE_LENGTH`.
@@ -94,7 +133,7 @@ All conversation routes return 404 `{"code": "RESOURCE_NOT_FOUND", "message": "R
 - `apps/identity/ownership.py`: `readable_documents(user)` = owner is the user AND (course material in an owned course, or upload in a reachable conversation). Stricter than `owned_documents` (course owner only), matching `question_documents`.
 - `apps/documents/models.py`: `Document.source_format`. `apps/documents/views.py`: `DocumentFileView`.
 
-## Frontend plan (not built yet)
+### Frontend plan (historical; completed November 16, 2026)
 
 Order: API client and types → thread list and history loading → retry and timed-out questions → tools used and citations → conversation and upload deletion.
 
@@ -104,7 +143,7 @@ Opening a cited source (the API uses a bearer token, not cookies, so a plain lin
 - PPTX: label "Slide N"; fetch → blob → temporary `<a download="name.pptx">` click → revoke. DOCX: no location label; same download.
 - Files are fully loaded into memory (uploads are at most 20 MB).
 
-## Tests
+### Tests
 
 - `backend/tests/documents/test_conversation_messages.py`: history order and linking; INSUFFICIENT_CONTEXT shape; failures keep FAILED; question committed before the AI call; AI call outside transactions even with ATOMIC_REQUESTS on; invalid/foreign requests save nothing; titles; ordering by activity; deleted-thread cases (no reply, 404 not 500); retry (same question, sources, 409s, 404s, saved text used); timeout at 1:55 vs 2:00 without DB writes; late answers; first answer wins (unit and end to end); old attempt cannot fail a newer retry; DB constraints; trace saved on replies; failed answers keep no trace.
 - `backend/apps/knowledge/tests/test_questions_api.py`: trace from real retrieval (one entry with breakdown, outranked shows 0, nothing found keeps the trace); generic endpoint does not expose the trace.
@@ -113,7 +152,7 @@ Opening a cited source (the API uses a bearer token, not cookies, so a plain lin
 - Mutation checks M1–M16 all caught by their intended tests (old attempt failing a retry, late answers dropped, atomic question route, timeout display, title overwrite, deleted-thread 500, response built from result instead of saved reply, trace counts/kinds/shape, generic endpoint leaking the trace, trace not saved, ownership rule, PDF inline, citation lookup ownership, one query per citation).
 - Not shown by tests: concurrent retries with real simultaneous requests (row locks); real AI timing; opening a PDF at a page in a real browser; Safari's handling of `#page` on blob URLs.
 
-## Repository discoveries
+### Repository discoveries
 
 - PPTX `page_number` is the 1-based slide position (verified by running the processing service parser and chunker on a generated deck): empty slides keep their number but produce no chunks; hidden slides are numbered like PowerPoint; every chunk of a slide carries its number and starts with `[Slide N: title]`.
 - DOCX `page_number` is always 1, an internal compatibility value, never a page citation (services/document-processing/processing_service/document_parser.py).
@@ -121,7 +160,7 @@ Opening a cited source (the API uses a bearer token, not cookies, so a plain lin
 - `owned_documents` excludes chat uploads; chat uploads are reachable through conversation routes and `question_documents`.
 - CORS: `authorization` is allowed by django-cors-headers defaults; `http://localhost:5173` is the default allowed origin.
 
-## Pitfalls learned
+### Pitfalls learned
 
 - Backend tests need Docker Desktop running: `backend/venv/Scripts/python.exe scripts/check.py --component backend [--suite documents|ai-learning]`.
 - Repo uses `core.autocrlf=true`; working files may be CRLF or LF. Git stores LF, so diffs are unaffected; mutation scripts must match either line ending.
@@ -131,18 +170,18 @@ Opening a cited source (the API uses a bearer token, not cookies, so a plain lin
 - SCRUM-124 renames `.claude/skills/scrum-123-landing-page`; this task uses a new folder to avoid a rename conflict.
 - Frontend (from SCRUM-124): run Vitest from PowerShell, not Git Bash (drive-letter case loads Vitest twice). jsdom has no CSS or layout.
 
-## Known limits (accepted so far)
+### Known limits (accepted so far)
 
 - PPTX citations download instead of opening at the slide (team ticket pending).
 - Retry may return an answer from the older attempt's sources if that attempt finishes first (first finished wins).
 - A failed attempt's search is not recorded.
 
-## Follow-up tickets (suggested; the owner creates them)
+### Follow-up tickets (suggested; the owner creates them)
 
 - PPTX (and possibly DOCX) to PDF conversion so citations open at the slide/page.
 - Optional: show failed attempts' traces; reconcile `owned_documents` and `readable_documents` rules if course transfer becomes a feature.
 
-## Progress (November 16, 2026)
+### Progress snapshot (November 16, 2026)
 
 Committed by the owner:
 - 25b4c07 feat(SCRUM-24): persist Pandu conversation messages and retries
@@ -158,7 +197,7 @@ Review guide written: `docs/scrum-24-teammate-validation.md` (same structure as 
 
 Remaining: Sanish runs the guide and the report is filled in from the chat; browser checks the tests cannot do (PDF at page in Chrome/Edge/Firefox; Safari; dropdown and confirmations at 375/768/1440); AI report under docs/ai-dev-reports/; push and PR (state that backend blockers were built on this ticket).
 
-## Frontend as built (November 16, 2026)
+### Frontend as built (November 16, 2026)
 
 Owner's decisions: thread list is a "Chats" dropdown in the Pandu panel (course's chats only); sessionStorage keeps only the active chat ID and selected sources, messages always reload from the backend; "+ New chat" creates on the server at once ("New chat" until titled); inline delete confirmation; deleting the active chat switches to the most recent remaining one, or an empty state (no auto-create; auto-create only on first load with no chats); chat-upload delete in Sources with inline confirmation; tools used as a one-line summary expandable to per-source details; citations open the source, excerpt kept behind an "Excerpt" toggle; a PENDING question shows "Pandu is still answering…" with "Check again" (no polling).
 
@@ -186,5 +225,5 @@ Frontend pitfalls: a PDF tab must be opened synchronously in the click handler; 
 - Before the PR: `git fetch origin`, `git rebase origin/development`, re-run tests. Never rebase development onto a task branch.
 - After a rebase of pushed commits: `git push --force-with-lease`, only on your own task branch.
 - Push to GitHub first (`github` remote, GitHub Actions CI), confirm the build, then to Bitbucket (`origin`), where PRs are opened. CI runs on feature/**, chore/**, development and main.
-- PR into development with reviewers; Bitbucket "Squash, fast forward", message `SCRUM-24: <task name>`. Keep the task branch.
+- PR into development with reviewers; Bitbucket "Squash, fast forward", message `SCRUM-25: <task name>`. Keep the task branch.
 - AI curiosity report and grade go under docs/ai-dev-reports/, labelled with the Jira ID, in a separate final commit.
