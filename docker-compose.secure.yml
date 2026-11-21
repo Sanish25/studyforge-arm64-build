@@ -1,0 +1,39 @@
+# SCRUM-134: TLS and authenticated PostgreSQL/Redis. Combine with the base file:
+#   docker compose -f docker-compose.yml -f docker-compose.secure.yml up -d db redis
+# Required: STUDYFORGE_TLS_DIR (postgres.crt/.key, redis.crt/.key, ca.crt),
+# STUDYFORGE_REDIS_ACL_FILE, STUDYFORGE_PRIVATE_IP and PG_REMOTE_TLS_CIDR.
+# Rollback: start again with docker-compose.yml alone; data volumes are reused.
+services:
+  db:
+    entrypoint: ["/bin/sh", "/etc/studyforge/postgres-entrypoint.sh"]
+    command: []
+    environment:
+      PG_REMOTE_TLS_CIDR: ${PG_REMOTE_TLS_CIDR:?Set the verified OKE pod source CIDR}
+    ports: !override
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+      - "${STUDYFORGE_PRIVATE_IP:?Set the VM private IPv4}:${POSTGRES_PRIVATE_PORT:-5432}:5432"
+    volumes:
+      - ./infrastructure/secure-transport/postgres-entrypoint.sh:/etc/studyforge/postgres-entrypoint.sh:ro
+      - ./infrastructure/secure-transport/pg_hba.conf.template:/etc/studyforge/pg_hba.conf.template:ro
+      - ${STUDYFORGE_TLS_DIR:?Set the server TLS directory}/postgres.crt:/run/studyforge-tls-source/postgres.crt:ro
+      - ${STUDYFORGE_TLS_DIR}/postgres.key:/run/studyforge-tls-source/postgres.key:ro
+    restart: unless-stopped
+
+  redis:
+    entrypoint: ["/bin/sh", "/etc/studyforge/redis-entrypoint.sh"]
+    command: []
+    ports: !override
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+      - "${STUDYFORGE_PRIVATE_IP}:${REDIS_TLS_PORT:-6380}:6380"
+    volumes:
+      - ./infrastructure/secure-transport/redis-entrypoint.sh:/etc/studyforge/redis-entrypoint.sh:ro
+      - ./infrastructure/secure-transport/redis.conf:/etc/studyforge/redis.conf:ro
+      - ${STUDYFORGE_REDIS_ACL_FILE:?Set the rendered Redis ACL file}:/etc/studyforge/redis-users.acl:ro
+      - ${STUDYFORGE_TLS_DIR}/redis.crt:/run/studyforge-tls-source/redis.crt:ro
+      - ${STUDYFORGE_TLS_DIR}/redis.key:/run/studyforge-tls-source/redis.key:ro
+      - ${STUDYFORGE_TLS_DIR}/ca.crt:/run/studyforge-tls-source/ca.crt:ro
+    healthcheck:
+      # Liveness without credentials: an authentication error still proves
+      # that the server is accepting connections.
+      test: ["CMD-SHELL", "redis-cli -p 6379 ping 2>&1 | grep -qE 'PONG|NOAUTH'"]
+    restart: unless-stopped

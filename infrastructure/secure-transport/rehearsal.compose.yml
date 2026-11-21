@@ -1,0 +1,20 @@
+# Rehearsal only: a separate Docker network stands in for the OKE pod subnet.
+# Clients join it from 172.31.250.128/25 (PG_REMOTE_TLS_CIDR) and reach the
+# servers at the addresses listed in the rehearsal certificate SANs.
+networks:
+  oke-sim:
+    ipam:
+      config:
+        - subnet: 172.31.250.0/24
+
+services:
+  db:
+    networks:
+      default: {}
+      oke-sim:
+        ipv4_address: 172.31.250.10
+  redis:
+    networks:
+      default: {}
+      oke-sim:
+        ipv4_address: 172.31.250.11

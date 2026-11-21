@@ -1,0 +1,18 @@
+# SCRUM-134 PostgreSQL client authentication. Rendered at container start;
+# @REMOTE_TLS_CIDR@ is the verified OKE pod source range. First match wins.
+# The data-directory pg_hba.conf is left untouched for rollback.
+
+# In-container administration, unchanged from the image defaults.
+local      all                    all                                    trust
+host       all                    all             127.0.0.1/32           trust
+host       all                    all             ::1/128                trust
+
+# OKE pods: only the processing runtime role, only its database, only TLS.
+hostssl    studyforge_processing  studyforge_processing  @REMOTE_TLS_CIDR@  scram-sha-256
+host       all                    all             @REMOTE_TLS_CIDR@      reject
+
+# The processing database never accepts plaintext from any network source.
+hostnossl  studyforge_processing  all             all                    reject
+
+# Host-local Django through the loopback-published port, as before.
+host       all                    all             all                    scram-sha-256

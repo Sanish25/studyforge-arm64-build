@@ -12,6 +12,7 @@ entries over rewriting history.
 | [frontend-vercel-deployment.md](./frontend-vercel-deployment.md) | SCRUM-126: React/Vite on Vercel, `/api` proxy, env, Google OAuth, CI/CD, troubleshooting |
 | [backend-oracle-deployment.md](./backend-oracle-deployment.md) | SCRUM-125: Django backend, Postgres + pgvector, and Redis on Oracle OCI (+ `scripts/deploy-oci.sh`) |
 | [production-document-storage.md](./production-document-storage.md) | SCRUM-127: private object storage, service connections, cutover, and probes |
+| [scrum-134-postgres-redis-network.md](./scrum-134-postgres-redis-network.md) | SCRUM-134: PostgreSQL/Redis TLS and auth, processing DB roles, private OKE paths, rehearsal and open issues |
 
 ## Frontend vs backend deploy
 
