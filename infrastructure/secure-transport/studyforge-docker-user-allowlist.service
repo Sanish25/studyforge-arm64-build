@@ -1,0 +1,17 @@
+# SCRUM-134: re-apply the DOCKER-USER allow-list whenever Docker starts.
+# Install: /usr/local/sbin/studyforge-docker-user-allowlist (the script) and
+# /etc/systemd/system/studyforge-docker-user-allowlist.service (this file).
+[Unit]
+Description=StudyForge DOCKER-USER allow-list for private PostgreSQL/Redis ports
+After=docker.service
+Requires=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/studyforge-docker-user-allowlist apply
+ExecStop=/usr/local/sbin/studyforge-docker-user-allowlist remove
+
+[Install]
+WantedBy=docker.service
