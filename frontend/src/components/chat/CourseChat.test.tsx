@@ -160,12 +160,15 @@ it("records and transcribes through the fallback when browser recognition is una
   Object.defineProperty(window, "MediaRecorder", { configurable: true, value: undefined });
 });
 
-it("explains why a transcribed or typed draft cannot be sent without a READY source", () => {
+it("allows sending a draft without a READY source so Pandu can clarify", () => {
+  const send = vi.fn();
   render(<CourseChat courseId={42} messages={[]} references={[]} selectedReferences={[]} status="idle"
-    onSend={vi.fn()} onReferencesChange={vi.fn()} onAddDocuments={vi.fn()} onCitation={vi.fn()} />);
-  fireEvent.change(screen.getByRole("textbox", { name: "Message Pandu" }), { target: { value: "What is an atom?" } });
-  expect(screen.getByRole("button", { name: "Send to Pandu" })).toBeDisabled();
-  expect(screen.getByRole("status")).toHaveTextContent("Select at least one READY source in Sources");
+    onSend={send} onReferencesChange={vi.fn()} onAddDocuments={vi.fn()} onCitation={vi.fn()} />);
+  fireEvent.change(screen.getByRole("textbox", { name: "Message Pandu" }), { target: { value: "hi" } });
+  expect(screen.getByRole("button", { name: "Send to Pandu" })).toBeEnabled();
+  expect(screen.queryByText("Select at least one READY source in Sources")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Send to Pandu" }));
+  expect(send).toHaveBeenCalledWith("hi", []);
 });
 
 it("keeps the composer usable when recording permission is denied", async () => {

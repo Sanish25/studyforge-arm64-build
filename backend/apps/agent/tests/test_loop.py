@@ -8,6 +8,21 @@ from apps.agent.pandu.loop import MAX_TOOL_CALLS_PER_TURN, run_pandu_turn
 from apps.courses.models import Course, TodoItem
 
 
+def _ok_step(text: str) -> AgentStep:
+    return AgentStep(
+        kind="message",
+        text=json.dumps(
+            {
+                "type": "message",
+                "status": "ok",
+                "text": text,
+                "citations": [],
+                "tool_trace": [],
+            }
+        ),
+    )
+
+
 class LoopTests(TestCase):
     @classmethod
     def setUpTestData(cls):
@@ -458,3 +473,111 @@ class LoopTests(TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(seen["conversation_id"], conversation.id)
         self.assertEqual(seen["document_ids"], [document.id])
+
+    def test_prior_messages_are_injected_before_current_ask(self):
+        """SCRUM-77: follow-ups see earlier turns in the LLM prompt (AC2)."""
+
+        def classify(message, context):
+            return {
+                "label": "IN_SCOPE",
+                "needs_documents": False,
+                "reason": "follow-up",
+            }
+
+        seen: dict = {}
+
+        class CaptureLLM(ScriptedAgentLLM):
+            def step(self, messages, tools):
+                if "messages" not in seen:
+                    seen["messages"] = list(messages)
+                return super().step(messages, tools)
+
+        reply = run_pandu_turn(
+            user=self.user,
+            message="Give me an analogy for that",
+            context={
+                "course_id": self.course.id,
+                "course_name": self.course.name,
+                "document_ids": [],
+                "prior_messages": [
+                    {"role": "user", "content": "What is virtual memory?"},
+                    {
+                        "role": "assistant",
+                        "content": "Virtual memory maps addresses to frames.",
+                    },
+                    {"role": "user", "content": ""},  # ignored
+                    {"role": "tool", "content": "noise"},  # ignored
+                ],
+            },
+            classifier=classify,
+            llm=CaptureLLM([_ok_step("Think of a library card catalog.")]),
+        )
+
+        self.assertEqual(reply["status"], "ok")
+        roles = [item["role"] for item in seen["messages"]]
+        contents = [item.get("content") for item in seen["messages"]]
+        self.assertEqual(roles[0], "system")
+        self.assertEqual(roles[1], "user")
+        self.assertEqual(contents[1], "What is virtual memory?")
+        self.assertEqual(roles[2], "assistant")
+        self.assertEqual(contents[2], "Virtual memory maps addresses to frames.")
+        self.assertEqual(roles[3], "user")
+        current = json.loads(contents[3])
+        self.assertEqual(current["message"], "Give me an analogy for that")
+        # Junk prior rows must not appear.
+        self.assertEqual(len(seen["messages"]), 4)
+
+    def test_failed_or_empty_recall_history_does_not_block_reply(self):
+        """Like optional citations: recall_history must not gate the answer."""
+
+        def classify(message, context):
+            return {
+                "label": "IN_SCOPE",
+                "needs_documents": False,
+                "reason": "follow-up",
+            }
+
+        llm = ScriptedAgentLLM(
+            [
+                AgentStep(
+                    kind="tool_calls",
+                    tool_calls=(
+                        ToolCallRequest(
+                            name="recall_history",
+                            args={"conversation_id": 9_999_999},
+                        ),
+                    ),
+                ),
+                _ok_step("Virtual memory is like a desk with overflow drawers."),
+            ]
+        )
+        reply = run_pandu_turn(
+            user=self.user,
+            message="Give me an analogy for that",
+            context={
+                "course_id": self.course.id,
+                "conversation_id": None,
+                "document_ids": [],
+                "prior_messages": [
+                    {"role": "user", "content": "What is virtual memory?"},
+                    {
+                        "role": "assistant",
+                        "content": "It maps addresses to frames.",
+                    },
+                ],
+            },
+            classifier=classify,
+            llm=llm,
+        )
+        self.assertEqual(reply["status"], "ok")
+        self.assertIn("desk", reply["text"].lower())
+        self.assertTrue(
+            any(entry.get("name") == "recall_history" for entry in reply["tool_trace"])
+        )
+        # Failed lookback is recorded, but the student still gets an answer.
+        self.assertTrue(
+            any(
+                entry.get("name") == "recall_history" and entry.get("ok") is False
+                for entry in reply["tool_trace"]
+            )
+        )

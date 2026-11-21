@@ -96,6 +96,7 @@ class PanduEndpointTests(TestCase):
         self.assertEqual(kwargs["context"]["course_id"], self.course.id)
         self.assertEqual(kwargs["context"]["course_name"], self.course.name)
         self.assertEqual(kwargs["context"]["conversation_id"], self.conversation.id)
+        self.assertEqual(kwargs["context"]["prior_messages"], [])
 
         messages = list(
             ConversationMessage.objects.filter(conversation=self.conversation).order_by(
@@ -112,6 +113,63 @@ class PanduEndpointTests(TestCase):
 
         self.conversation.refresh_from_db()
         self.assertEqual(self.conversation.title, "list my tasks")
+
+    @patch("apps.agent.views.run_pandu_turn", return_value=_envelope(
+        text="A library card is like a page table entry.",
+    ))
+    def test_follow_up_passes_prior_messages_without_duplicating_ask(self, mocked_turn):
+        """SCRUM-77: earlier turns are loaded before saving the new question."""
+        from apps.agent.pandu.tools.memory import remember_turn
+
+        asked = remember_turn(
+            user=self.owner,
+            conversation_id=self.conversation.id,
+            role="user",
+            content="What is virtual memory?",
+        )
+        remember_turn(
+            user=self.owner,
+            conversation_id=self.conversation.id,
+            role="assistant",
+            content="Virtual memory maps addresses to frames.",
+            reply_to=asked["id"],
+        )
+
+        response = self.client.post(
+            URL,
+            {
+                "message": "Give me an analogy for that",
+                "course_id": self.course.id,
+                "conversation_id": self.conversation.id,
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+
+        prior = mocked_turn.call_args.kwargs["context"]["prior_messages"]
+        self.assertEqual(
+            [row["content"] for row in prior],
+            [
+                "What is virtual memory?",
+                "Virtual memory maps addresses to frames.",
+            ],
+        )
+        # Current ask is saved after the load, so it must not be in prior_messages.
+        self.assertNotIn(
+            "Give me an analogy for that",
+            [row["content"] for row in prior],
+        )
+
+        saved = list(
+            ConversationMessage.objects.filter(conversation=self.conversation).order_by(
+                "created_at", "id"
+            )
+        )
+        self.assertEqual(saved[-2].content, "Give me an analogy for that")
+        self.assertEqual(
+            saved[-1].content,
+            "A library card is like a page table entry.",
+        )
 
     @patch("apps.agent.views.run_pandu_turn", return_value=_envelope())
     def test_without_conversation_does_not_persist(self, mocked_turn):

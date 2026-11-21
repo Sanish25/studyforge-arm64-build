@@ -17,7 +17,7 @@ from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from apps.agent.pandu.loop import run_pandu_turn
 from apps.agent.pandu.schema import error_reply
-from apps.agent.pandu.tools.memory import remember_turn
+from apps.agent.pandu.tools.memory import prior_turns_for_prompt, remember_turn
 from apps.agent.serializers import PanduAgentSerializer
 from apps.conversations.models import ConversationMessage
 from apps.conversations.services import mark_failed
@@ -69,12 +69,20 @@ class PanduAgentView(APIView):
                 course_id = conversation.course_id
                 course = owned_course(request.user, course_id)
 
+        # Load earlier turns *before* saving this ask so the current question is
+        # not duplicated in the model prompt (SCRUM-77 follow-up context).
+        prior_messages = (
+            prior_turns_for_prompt(conversation) if conversation is not None else []
+        )
+
         # course_name goes into the loop payload so "what course is this?" needs no extra tool.
+        # prior_messages are injected by run_pandu_turn ahead of the current ask.
         context = {
             "course_id": course_id,
             "course_name": course.name if course is not None else None,
             "conversation_id": conversation_id,
             "document_ids": document_ids,
+            "prior_messages": prior_messages,
         }
 
         # --- durable memory: save the student question first (SCRUM-24 pattern) ---

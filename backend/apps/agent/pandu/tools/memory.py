@@ -26,12 +26,59 @@ from apps.identity.ownership import owned_conversation
 # How many messages Pandu can pull back in one recall.
 DEFAULT_HISTORY_LIMIT = 20
 MAX_HISTORY_LIMIT = 50
+# Auto-injected into each agent turn so follow-ups work without a tool call.
+AUTO_HISTORY_LIMIT = 8
 
 Status = ConversationMessage.Status
 Role = ConversationMessage.Role
 
 
 # --- helpers -----------------------------------------------------------------
+
+
+def prior_turns_for_prompt(conversation, *, limit: int = AUTO_HISTORY_LIMIT) -> list[dict[str, str]]:
+    """Recent completed Q→A turns for the agent prompt (oldest → newest).
+
+    Only ANSWERED user questions with a delivered assistant reply are included.
+    PENDING / FAILED asks are skipped so the model does not see in-flight or
+    failed turns. Empty content is skipped. Call this *before* saving the new
+    user question so the current ask is not duplicated in the prompt.
+    """
+    capped = max(1, min(int(limit), MAX_HISTORY_LIMIT))
+    # Newest answered questions first; stop once we have enough message rows.
+    questions = (
+        ConversationMessage.objects.filter(
+            conversation=conversation,
+            role=Role.USER,
+            status=Status.ANSWERED,
+        )
+        .exclude(content="")
+        .select_related("reply")
+        .order_by("-created_at", "-id")
+    )
+
+    pairs: list[tuple[str, str]] = []
+    for question in questions:
+        reply = getattr(question, "reply", None)
+        if reply is None:
+            continue
+        question_text = question.content.strip()
+        reply_text = (reply.content or "").strip()
+        if not question_text or not reply_text:
+            continue
+        pairs.append((question_text, reply_text))
+        if len(pairs) * 2 >= capped:
+            break
+
+    pairs.reverse()  # oldest → newest for the prompt
+    turns: list[dict[str, str]] = []
+    for question_text, reply_text in pairs:
+        # Keep only full Q→A pairs inside the window (never cut mid-pair).
+        if len(turns) + 2 > capped:
+            break
+        turns.append({"role": Role.USER, "content": question_text})
+        turns.append({"role": Role.ASSISTANT, "content": reply_text})
+    return turns
 
 
 def _positive_int(value: Any) -> int | None:
@@ -231,8 +278,11 @@ register(
     ToolSpec(
         name="recall_history",
         description=(
-            "Load recent messages for an owned conversation (oldest to newest). "
-            "Use to continue a thread after refresh. Does not include other users' chats."
+            "Optional deeper lookback: load older owned conversation messages "
+            "(oldest to newest). Recent turns are already in the chat prompt when "
+            "available — call this only if you need more history. Never refuse to "
+            "answer because this tool was unused, failed, or returned no messages. "
+            "Does not include other users' chats."
         ),
         parameters={
             "type": "object",

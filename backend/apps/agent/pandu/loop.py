@@ -28,7 +28,8 @@ _LOOP_SYSTEM = (
     "the Pandu reply envelope: type=message, status (ok|clarify|abstain|error), "
     "text, citations (array, may be empty), tool_trace (array, may be empty). "
     "Prefer ask_course_question for normal material questions. Do not run both "
-    "ask_course_question and retrieve_chunks/answer_from_sources in the same turn."
+    "ask_course_question and retrieve_chunks/answer_from_sources in the same turn. "
+    "recall_history is optional; never block a student-facing answer on it."
 )
 
 
@@ -80,8 +81,23 @@ def run_pandu_turn(
 
     active_llm = llm if llm is not None else get_agent_llm()
     tool_specs = all_tools()
+    # Prior turns (from the view) sit between system and the current ask so
+    # follow-ups resolve "that" / "it" without a recall_history tool call.
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": _LOOP_SYSTEM},
+    ]
+    for turn in context.get("prior_messages") or []:
+        if not isinstance(turn, dict):
+            continue
+        role = turn.get("role")
+        content = turn.get("content")
+        if role not in {"user", "assistant"} or not isinstance(content, str):
+            continue
+        text = content.strip()
+        if not text:
+            continue
+        messages.append({"role": role, "content": text})
+    messages.append(
         {
             "role": "user",
             "content": json.dumps(
@@ -94,7 +110,7 @@ def run_pandu_turn(
                 }
             ),
         },
-    ]
+    )
 
     tool_trace: list[dict[str, Any]] = []
     tool_results: list[tuple[str, dict[str, Any]]] = []
@@ -230,7 +246,12 @@ def _execute_tool(*, user, call: ToolCallRequest, context: dict[str, Any]) -> di
 
 
 def _evidence_gate(tool_results: list[tuple[str, dict[str, Any]]]) -> dict[str, Any] | None:
-    """After RAG tools, empty evidence must not become an invented answer."""
+    """After RAG tools, empty evidence must not become an invented answer.
+
+    Intentionally ignores recall_history (and other non-RAG tools): history
+    lookback is optional, like empty citations — a missing/failed/empty recall
+    must not block a normal reply.
+    """
     for name, result in tool_results:
         if not isinstance(result, dict) or not result.get("ok"):
             continue
