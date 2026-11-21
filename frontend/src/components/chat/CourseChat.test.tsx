@@ -164,11 +164,12 @@ it("allows sending a draft without a READY source so Pandu can clarify", () => {
   const send = vi.fn();
   render(<CourseChat courseId={42} messages={[]} references={[]} selectedReferences={[]} status="idle"
     onSend={send} onReferencesChange={vi.fn()} onAddDocuments={vi.fn()} onCitation={vi.fn()} />);
-  fireEvent.change(screen.getByRole("textbox", { name: "Message Pandu" }), { target: { value: "hi" } });
+  fireEvent.change(screen.getByRole("textbox", { name: "Message Pandu" }), { target: { value: "What is an atom?" } });
   expect(screen.getByRole("button", { name: "Send to Pandu" })).toBeEnabled();
   expect(screen.queryByText("Select at least one READY source in Sources")).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Send to Pandu" }));
-  expect(send).toHaveBeenCalledWith("hi", []);
+  expect(send).toHaveBeenCalledExactlyOnceWith("What is an atom?", []);
+  expect(screen.getByRole("textbox", { name: "Message Pandu" })).toHaveValue("");
 });
 
 it("keeps the composer usable when recording permission is denied", async () => {
