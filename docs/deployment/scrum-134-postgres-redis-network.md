@@ -2,9 +2,35 @@
 
 Subtask of SCRUM-122 (OKE document-processing worker). Owner: Gaurav.
 
-**Status, 2026-11-20:** local rehearsal complete and passing. **No production
-change has been made.** Production work is blocked on one open issue (below)
-and then needs the approved maintenance window.
+**Status, 2026-11-21:** code and local rehearsal kit merged; **no production
+change has been made**, so the OKE worker (SCRUM-122 phase 3) is still blocked
+on this subtask. ACL fixes from source review (below) are committed but not yet
+rehearsed. Production follows the
+[run-sheet](./scrum-134-production-runsheet.md) once its gates pass.
+
+## Source review findings (2026-11-21, not yet rehearsed)
+
+1. **kombu was unpinned.** `celery==5.6.3` only requires `kombu>=5.6.0`, so
+   the worker image resolved kombu 5.7.0 (released 2026-11-03; the published
+   image was built 2026-11-18), while the local probe venv had 5.6.2. The ACL
+   already contained 5.7.0's `_kombu.binding_deadlines` key, so measurements
+   mixed the two versions. `kombu==5.7.0` is now pinned in both requirements
+   files, and `rehearse.sh` fails if the image or probe Python differs.
+2. **Missing `RPOP`/`PEXPIRE`.** kombu 5.7.0 uses `RPOP` when it polls a
+   queue and `PEXPIRE` when it writes or reads a queue with `x-expires`.
+   Celery's pidbox reply queues have `x-expires`, so startup mingle and
+   `inspect`/control replies need both commands whenever two workers share
+   the broker. That never happened in the rehearsal (workers ran one at a
+   time), but it is the production topology: the VM's legacy worker and the
+   OKE worker. Both app users now have `+rpop +pexpire`, with key patterns
+   unchanged. The rehearsal now runs the legacy consumer while the OKE worker
+   is up and checks mingle and a control ping.
+3. **Password reset would have broken.** With `DEBUG` off, the SCRUM-135
+   `password_reset` cache is a Django `RedisCache` on the broker URL
+   (`SET NX EX`, `EXISTS`, `INCRBY`, `DEL` on `studyforge_password_reset:*`).
+   The Django user had neither the key pattern nor `INCRBY`, so every reset
+   request would have failed after the cutover. These are now granted to
+   `studyforge_django` only, and `broker_probe.py reset-cache` checks them.
 
 ## Open issue: intermittent Redis ACL denial (blocks production)
 
@@ -22,11 +48,15 @@ So some Celery/kombu operation sometimes needs a command, key or channel that
 `redis-users.acl.template` does not grant. That run printed only the count, so
 the denied command and key are not known yet.
 
-**Likely cause (unconfirmed).** kombu 5.6 tracks queue bindings with
-deadlines (`_kombu.binding_deadlines`) and cleans up expired ones in a Lua
-script. The cleanup timing varies, and it may occasionally touch a binding key
-outside the worker's allowed patterns (for example `_kombu.binding.celery`) or
-a pidbox reply key. The legacy Django/Celery side is another candidate.
+**Likely cause (still unconfirmed).** The earlier guess was kombu's
+binding-deadline Lua cleanup. In kombu 5.7.0, though, `REFRESH_BINDING` and
+`SWEEP_BINDINGS` only touch `_kombu.binding*`, `_kombu.binding_permanent.*`
+and `_kombu.binding_deadlines` for the `celery.pidbox`, `reply.celery.pidbox`
+and `celeryev` exchanges, which the worker patterns already cover. Binding
+TTLs are at least one hour, so a three-minute run never sweeps anything. The
+missing `RPOP`/`PEXPIRE` (finding 2) is the best remaining candidate: any
+stray pidbox reply hits it. The rule below still applies: the denial counts
+as closed only when the log names it, or after five clean runs with the fixes.
 
 **How to diagnose.** `rehearse.sh` now prints the `ACL LOG` metadata
 (`reason`, `context`, `object`, `username`; never payloads) whenever a denial
@@ -78,7 +108,9 @@ of the verification checklist.
 | `infrastructure/secure-transport/redis-users.acl.template`, `generate-redis-acl.sh` | Least-privilege users (`studyforge_ops`, `studyforge_django`, `studyforge_worker`) rendered with new random passwords (file holds SHA-256 hashes only). |
 | `services/document-processing/provision_database.py` | Opt-in split roles when `PROCESSING_DB_MIGRATOR` is set; default single-owner behaviour unchanged (keeps Compose and `check_processing_live.py` working). |
 | `services/document-processing/processing_service/tests/test_provision_database.py` | Real-PostgreSQL tests of the split (runs in CI against the disposable server; skips without a superuser). |
-| `infrastructure/secure-transport/rehearse.sh` plus `rehearsal.compose.yml`, `broker_probe.py`, `pg_probe.py` | Repeatable local rehearsal: upgrade, access matrix, Celery, rollback. |
+| `infrastructure/secure-transport/rehearse.sh` plus `rehearsal.compose.yml`, `broker_probe.py`, `pg_probe.py` | Repeatable local rehearsal: upgrade, access matrix, Celery (including overlapping workers), password-reset cache, rollback. |
+| `infrastructure/secure-transport/docker-user-allowlist.sh`, `studyforge-docker-user-allowlist.service` | `DOCKER-USER` drop rules for non-OKE sources on 5432/6380, re-applied whenever Docker starts. Shellcheck only; not yet run on Linux. |
+| `docs/deployment/scrum-134-production-runsheet.md` | Production steps, expected output, stop conditions and rollback. |
 
 ## How the pieces fit
 
@@ -99,15 +131,15 @@ of the verification checklist.
 ### Redis permissions and how they were measured
 
 Commands, keys and channels were recorded with `MONITOR` against permissive
-probe users while running the real code with the pinned versions (celery
-5.6.3, kombu 5.6.2, redis-py 6.4.0): Django readiness `PING`,
+probe users while running the real code (celery 5.6.3, redis-py 6.4.0; kombu
+was unpinned then, see finding 1, and is now pinned to 5.7.0): Django readiness `PING`,
 `dispatch_document()`, a default-shape legacy Celery worker on `celery`, the
 OKE worker command line from `oke-worker.yaml` over TLS, and a hard-killed
 worker whose message is restored by a second worker (`crash_probe`). The
 kombu source added `SMEMBERS` (exchange lookup), `EXISTS` (queue check) and
 `UNSUBSCRIBE`.
 
-- Both app users: connection, queue (`LPUSH/RPUSH/BRPOP/LLEN/EXISTS/DEL`),
+- Both app users: connection, queue (`LPUSH/RPUSH/BRPOP/RPOP/LLEN/EXISTS/DEL/PEXPIRE`),
   transactions (`MULTI/EXEC/DISCARD/WATCH/UNWATCH`), unacked tracking (hash,
   sorted set, `GET/SET` mutex), bindings (sets), Lua (`EVALSHA`, `SCRIPT LOAD|EXISTS`,
   `TIME`), Pub/Sub on `/0.celery.pidbox` and `/0.celeryev/worker.*`.
@@ -115,7 +147,8 @@ kombu source added `SMEMBERS` (exchange lookup), `EXISTS` (queue check) and
   `_kombu.binding_deadlines`, `unacked*`, `celeryev.*`, `*.celery.pidbox*`. It
   cannot touch the `celery` queue or its bindings.
 - `studyforge_django` additionally covers `celery*` and all bindings, because
-  Gunicorn and the legacy `studyforge-celery.service` share one broker URL.
+  Gunicorn and the legacy `studyforge-celery.service` share one broker URL,
+  plus `INCRBY` on `studyforge_password_reset:*` for the password-reset cache.
 - Known, safe edge: `unacked` is shared per Redis DB. If the worker ever tries
   to restore an expired legacy `celery` message, the restore transaction is
   refused and the message stays for the legacy consumer.
@@ -183,19 +216,16 @@ and re-checks the data. All credentials live in a private temporary directory.
 
 ## Remaining work
 
-1. Close the open ACL issue (above).
-2. Write the production run-sheet with exact commands, expected output, stop
-   conditions and rollback for: backups; placing certs, ACL and credentials
-   under `/etc/studyforge/`; Compose up with the override; provisioning and
-   migrations over `127.0.0.1` with `verify-full`; switching
-   `CELERY_BROKER_URL` to the named Django user and restarting Gunicorn and
-   Celery. Send it to Aashish before the window.
-3. `DOCKER-USER` rules (allow only the verified pod source to 5432/6380 on
-   `enp0s6`, persisted after Docker starts), then the dedicated NSG.
-4. OKE connectivity test from Cloud Shell on the private subnet; confirm the
-   source address PostgreSQL sees and that 6379 is unreachable from OKE.
-5. Hand Sanish the runtime values for `oke-worker.yaml`: CA for the trust
-   ConfigMap, `PROCESSING_DB_*`, and `PROCESSING_REDIS_URL` with the worker user.
+1. Re-run `rehearse.sh` five times on this branch (needs Docker). Expect zero
+   failures and zero denials. Record the summaries. This closes the open issue.
+2. Send the [run-sheet](./scrum-134-production-runsheet.md) to Aashish and
+   book the window. It covers backups, secret placement, the in-place upgrade,
+   processing DB provisioning and migrations, the Django broker switch,
+   `DOCKER-USER` rules (`docker-user-allowlist.sh` plus its systemd unit), the
+   NSG, the Cloud Shell test, the handoff, and rollback.
+3. The VM checkout must contain these files first. Coordinate with the
+   SCRUM-127 deploy so Django is deployed only once.
+4. Hand Sanish the runtime values (run-sheet H1/H2).
 
 ## Rollback (summary)
 

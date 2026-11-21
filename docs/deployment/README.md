@@ -13,6 +13,7 @@ entries over rewriting history.
 | [backend-oracle-deployment.md](./backend-oracle-deployment.md) | SCRUM-125: Django backend, Postgres + pgvector, and Redis on Oracle OCI (+ `scripts/deploy-oci.sh`) |
 | [production-document-storage.md](./production-document-storage.md) | SCRUM-127: private object storage, service connections, cutover, and probes |
 | [scrum-134-postgres-redis-network.md](./scrum-134-postgres-redis-network.md) | SCRUM-134: PostgreSQL/Redis TLS and auth, processing DB roles, private OKE paths, rehearsal and open issues |
+| [scrum-134-production-runsheet.md](./scrum-134-production-runsheet.md) | SCRUM-134: production run-sheet (draft, needs approval): gates, window steps, network, Cloud Shell test, handoff, rollback |
 
 ## Frontend vs backend deploy
 
