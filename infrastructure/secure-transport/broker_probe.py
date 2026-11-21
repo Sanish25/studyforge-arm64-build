@@ -8,6 +8,7 @@ from SF134_BROKER_URL; nothing secret is printed.
   python broker_probe.py send QUEUE [MARKER]  # harmless celery.accumulate task
   python broker_probe.py worker QUEUE    # default Celery worker (legacy shape)
   python broker_probe.py inspect         # control ping; prints the replying workers
+  python broker_probe.py reset-cache     # production password-reset cache calls
 """
 
 import os
@@ -57,6 +58,15 @@ def main(action, *args):
         app("sf134-legacy").worker_main(
             ["worker", "--loglevel=INFO", "--pool=solo", f"--queues={args[0]}", "--hostname=sf134-legacy@%h"]
         )
+    elif action == "reset-cache":
+        from django.core.cache.backends.redis import RedisCache
+
+        # Same backend, prefix and calls as apps/users/password_reset.py with DEBUG off.
+        cache = RedisCache(URL, {"KEY_PREFIX": "studyforge_password_reset"})
+        key = f"password-reset:probe:{uuid4().hex}"
+        if not (cache.add(key, 1, timeout=60) and cache.incr(key) == 2):
+            raise SystemExit("reset-cache: unexpected result")
+        cache.delete(key)
     elif action == "inspect":
         celery_app = app()
         replies = celery_app.control.inspect(timeout=3).ping() or {}

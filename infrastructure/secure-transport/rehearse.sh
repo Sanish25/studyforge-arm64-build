@@ -147,6 +147,7 @@ expect "worker cannot read configuration" "NOPERM" "$(oke_redis --user studyforg
 expect "Django user cannot change ACLs" "NOPERM" "$(docker exec sf134r-redis-1 redis-cli --user studyforge_django --pass "$REDIS_DJANGO_PASSWORD" --no-auth-warning ACL SETUSER x on 2>&1)"
 expect "Django readiness PING (loopback, named user)" "ping: ok" "$(broker "$django_url" ping)"
 ops ACL LOG RESET >/dev/null
+expect "Django user can use the password-reset cache" "^reset-cache: ok$" "$(broker "$django_url" reset-cache)"
 
 section "Celery: secure OKE-equivalent worker and the legacy consumer"
 dependency_check=$("$py" -c "
