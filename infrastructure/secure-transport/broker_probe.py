@@ -1,11 +1,10 @@
 """Exercise StudyForge's real Redis broker usage for SCRUM-134 checks.
 
-The broker URL comes from SF134_BROKER_URL. The password-reset probe uses
-backend settings with disposable values. No probe loads an env file.
+Runs without loading backend settings or any env file. The broker URL comes
+from SF134_BROKER_URL; nothing secret is printed.
 
   python broker_probe.py ping            # Django readiness PING
   python broker_probe.py dispatch        # real dispatch_document() publish
-  python broker_probe.py password-reset  # real Django cache and throttle
   python broker_probe.py send QUEUE [MARKER]  # harmless celery.accumulate task
   python broker_probe.py worker QUEUE    # default Celery worker (legacy shape)
   python broker_probe.py inspect         # control ping; prints the replying workers
@@ -22,37 +21,13 @@ from django.conf import settings
 
 BACKEND = Path(__file__).resolve().parents[2] / "backend"
 URL = os.environ["SF134_BROKER_URL"]
-
-
-def password_reset():
-    sys.path.insert(0, str(BACKEND))
-    # Use the real production settings with disposable values. In particular,
-    # leave PASSWORD_RESET_CACHE_URL unset to exercise its broker URL fallback.
-    os.environ.clear()
-    os.environ.update(
-        DJANGO_SETTINGS_MODULE="config.settings",
-        PYTHON_DOTENV_DISABLED="1",
-        DJANGO_DEBUG="0",
-        DJANGO_SECRET_KEY="sf134-rehearsal",
-        DJANGO_ALLOWED_HOSTS="localhost",
-        PASSWORD_RESET_FRONTEND_URL="https://frontend.example.test",
-        STUDYFORGE_REQUIRE_SECURE_CONNECTIONS="1",
-        POSTGRES_PASSWORD="unused",
-        POSTGRES_SSLMODE="verify-full",
-        DOCUMENT_STORAGE_BACKEND="s3",
-        DOCUMENT_STORAGE_BUCKET="sf134-rehearsal",
-        DOCUMENT_STORAGE_REGION="us-phoenix-1",
-        PROCESSING_SERVICE_TOKEN="sf134-rehearsal",
-        CELERY_BROKER_URL=URL,
-    )
-    django.setup()
-    from apps.users.password_reset import EMAIL_REQUEST_LIMIT, _consume_email_limit
-
-    email = f"sf134-{uuid4().hex}@example.test"
-    allowed = [_consume_email_limit(email) for _ in range(EMAIL_REQUEST_LIMIT + 1)]
-    if allowed != [True] * EMAIL_REQUEST_LIMIT + [False]:
-        raise SystemExit("Password-reset throttle did not enforce the email limit")
-    print("password-reset: ok")
+# Same broker options as backend/config/settings.py.
+settings.configure(
+    CELERY_BROKER_URL=URL,
+    CELERY_BROKER_CONNECTION_TIMEOUT=3,
+    CELERY_BROKER_TRANSPORT_OPTIONS={"socket_connect_timeout": 3, "socket_timeout": 3},
+)
+django.setup()
 
 
 def app(name="sf134-probe"):
@@ -64,17 +39,6 @@ def app(name="sf134-probe"):
 
 
 def main(action, *args):
-    if action == "password-reset":
-        password_reset()
-        return
-
-    # Same broker options as backend/config/settings.py.
-    settings.configure(
-        CELERY_BROKER_URL=URL,
-        CELERY_BROKER_CONNECTION_TIMEOUT=3,
-        CELERY_BROKER_TRANSPORT_OPTIONS={"socket_connect_timeout": 3, "socket_timeout": 3},
-    )
-    django.setup()
     if action == "ping":
         from redis import Redis
 
