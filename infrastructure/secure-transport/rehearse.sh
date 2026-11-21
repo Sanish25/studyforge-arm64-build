@@ -62,6 +62,10 @@ runtime_password=$(openssl rand -hex 32)
 migrator_password=$(openssl rand -hex 32)
 docker image inspect "$image" >/dev/null 2>&1 || docker build -q -t "$image" services/document-processing >/dev/null
 pass "inputs ready in a private temporary directory"
+# The ACL is measured against exact versions; a stale image or venv invalidates the run.
+versions='import celery, kombu, redis; print(celery.__version__, kombu.__version__, redis.__version__)'
+expect "worker image has the pinned celery/kombu/redis" "^5\.6\.3 5\.7\.0 6\.4\.0$" "$(docker run --rm --entrypoint python "$image" -c "$versions")"
+expect "probe Python has the pinned celery/kombu/redis" "^5\.6\.3 5\.7\.0 6\.4\.0$" "$("$py" -c "$versions")"
 
 ops() { docker exec sf134r-redis-1 redis-cli --user studyforge_ops --pass "$REDIS_OPS_PASSWORD" --no-auth-warning "$@"; }
 psql_app() { docker exec sf134r-db-1 psql -U studyforge -d "$1" -tAc "$2"; }
@@ -190,12 +194,16 @@ expect "real dispatch_document() publish was consumed" "process_document_task\[.
 secure_worker sf134r-w2 172.31.250.222 "$runtime_password" -d >/dev/null
 sleep 20
 expect "message from a killed worker was restored and finished" "^sf134r-w1@.* sf134r-w2@" "$(ops MGET sf134r-crash:first sf134r-crash:recovered | paste -sd' ' -)"
-docker stop -t 10 sf134r-w2 >/dev/null
+# Production topology: the VM's legacy consumer runs while the OKE worker is
+# up, so startup mingle and control replies cross both Redis users.
 broker "$django_url" worker celery >"$work/legacy.log" 2>&1 &
 legacy=$!
 sleep 8
+expect "legacy consumer synced with the running OKE worker" "mingle: sync with 1 nodes" "$(cat "$work/legacy.log")"
+expect "both workers answer a control ping" "replies: .*sf134-legacy@.*sf134r-w2@" "$(broker "$django_url" inspect)"
 broker "$django_url" send celery >/dev/null
 sleep 4
+docker stop -t 10 sf134r-w2 >/dev/null
 kill "$legacy"
 wait "$legacy" 2>/dev/null || true
 expect "legacy celery-queue consumer works with the Django user" "celery\.accumulate\[.*succeeded" "$(cat "$work/legacy.log")"

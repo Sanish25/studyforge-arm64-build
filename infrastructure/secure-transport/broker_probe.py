@@ -7,6 +7,7 @@ from SF134_BROKER_URL; nothing secret is printed.
   python broker_probe.py dispatch        # real dispatch_document() publish
   python broker_probe.py send QUEUE [MARKER]  # harmless celery.accumulate task
   python broker_probe.py worker QUEUE    # default Celery worker (legacy shape)
+  python broker_probe.py inspect         # control ping; prints the replying workers
 """
 
 import os
@@ -56,6 +57,11 @@ def main(action, *args):
         app("sf134-legacy").worker_main(
             ["worker", "--loglevel=INFO", "--pool=solo", f"--queues={args[0]}", "--hostname=sf134-legacy@%h"]
         )
+    elif action == "inspect":
+        celery_app = app()
+        replies = celery_app.control.inspect(timeout=3).ping() or {}
+        celery_app.close()
+        print("replies:", " ".join(sorted(replies)))
     else:
         raise SystemExit(__doc__)
     print(f"{action}: ok")
