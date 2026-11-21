@@ -42,8 +42,12 @@ EOF
 app_password=$(sed -n 's/^POSTGRES_PASSWORD=//p' "$work/compose.env")
 base() { docker compose --env-file "$work/compose.env" -f docker-compose.yml -f "$here/rehearsal.compose.yml" "$@"; }
 secure() { docker compose --env-file "$work/compose.env" -f docker-compose.yml -f docker-compose.secure.yml -f "$here/rehearsal.compose.yml" "$@"; }
+legacy=
 # shellcheck disable=SC2329  # invoked by the EXIT trap
 cleanup() {
+  # A surviving legacy worker would keep logging in to the next run's Redis
+  # with stale credentials (seen as an `auth` ACL denial there).
+  if [[ -n "$legacy" ]]; then kill "$legacy" 2>/dev/null || true; fi
   docker ps -q --filter name=sf134r- | xargs -r docker stop >/dev/null 2>&1 || true
   if [[ "${KEEP:-0}" != 1 ]]; then
     secure down --volumes --remove-orphans >/dev/null 2>&1 || true
@@ -54,6 +58,10 @@ cleanup() {
 trap cleanup EXIT
 
 section "Prepare certificates, Redis ACL, credentials and worker image"
+if pgrep -f "$here/broker_probe.py worker" >/dev/null; then
+  echo "A broker_probe.py worker from an earlier run is still running; stop it first." >&2
+  exit 1
+fi
 "$here/generate-certs.sh" "$work/tls" IP:127.0.0.1,IP:172.31.250.10,IP:172.31.250.11 >/dev/null 2>&1
 "$here/generate-redis-acl.sh" "$work/acl" >/dev/null
 # shellcheck disable=SC1091
@@ -139,7 +147,9 @@ expect "processing DB refuses host plaintext" "REFUSED: .*no encryption" "$(host
 section "Redis access rules"
 expect "worker PING over TLS" "^PONG$" "$(oke_redis --user studyforge_worker --pass "$REDIS_WORKER_PASSWORD" ping)"
 expect "anonymous over TLS is refused" "NOAUTH" "$(oke_redis ping)"
-expect "wrong password is refused" "WRONGPASS" "$(oke_redis --user studyforge_worker --pass wrong ping)"
+# Full output, not oke_redis's first line: the AUTH error and NOAUTH reply race on stdout/stderr.
+expect "wrong password is refused" "WRONGPASS" "$(on_oke 172.31.250.211 redis:7-alpine redis-cli --tls --cacert /ca.pem \
+  -h 172.31.250.11 -p 6380 --no-auth-warning --user studyforge_worker --pass wrong ping)"
 expect "plaintext to the TLS port fails" "(reset|closed|Error)" "$(on_oke 172.31.250.212 redis:7-alpine redis-cli -h 172.31.250.11 -p 6380 ping | head -1)"
 expect "worker cannot touch the legacy celery queue" "NOPERM" "$(oke_redis --user studyforge_worker --pass "$REDIS_WORKER_PASSWORD" LPUSH celery x)"
 expect "worker cannot FLUSHALL" "NOPERM" "$(oke_redis --user studyforge_worker --pass "$REDIS_WORKER_PASSWORD" FLUSHALL)"
@@ -197,7 +207,8 @@ sleep 20
 expect "message from a killed worker was restored and finished" "^sf134r-w1@.* sf134r-w2@" "$(ops MGET sf134r-crash:first sf134r-crash:recovered | paste -sd' ' -)"
 # Production topology: the VM's legacy consumer runs while the OKE worker is
 # up, so startup mingle and control replies cross both Redis users.
-broker "$django_url" worker celery >"$work/legacy.log" 2>&1 &
+# exec, so $! is the Python worker itself and `kill` really stops it.
+(SF134_BROKER_URL=$django_url exec "$py" "$here/broker_probe.py" worker celery) >"$work/legacy.log" 2>&1 &
 legacy=$!
 sleep 8
 expect "legacy consumer synced with the running OKE worker" "mingle: sync with 1 nodes" "$(cat "$work/legacy.log")"
@@ -207,12 +218,15 @@ sleep 4
 docker stop -t 10 sf134r-w2 >/dev/null
 kill "$legacy"
 wait "$legacy" 2>/dev/null || true
+legacy=
 expect "legacy celery-queue consumer works with the Django user" "celery\.accumulate\[.*succeeded" "$(cat "$work/legacy.log")"
 denials=$(ops ACL LOG 100 | grep -cx reason || true)
 expect "no Redis ACL denials during Celery traffic" "^0$" "$denials"
 if [[ "$denials" != 0 ]]; then
   # ACL LOG metadata only (reason, context, denied command/key, user); no payloads.
-  ops ACL LOG 100 | paste - - | grep -E '^(reason|context|object|username)'$'\t' | cut -c1-200
+  ops ACL LOG 100 | paste - - | grep -E '^(reason|context|object|username|age-seconds)'$'\t' | cut -c1-200
+  # Which client: address, connection name, library and command only (no credentials).
+  ops ACL LOG 100 | paste - - | sed -n 's/^client-info\t//p' | grep -oE '(addr|name|lib-name|lib-ver|cmd)=[^ ]*' | paste -sd' ' -
 fi
 expect "document-processing queue drained" "^0$" "$(ops LLEN document-processing)"
 
