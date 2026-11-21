@@ -6,15 +6,12 @@
 # OUT_DIR/redis-credentials.env (plaintext passwords, mode 0600). Move the
 # credentials into the approved secret locations; never commit either file.
 #
-# Users (permissions measured with celery 5.6.3 / kombu 5.6.2 / redis 6.4.0;
-# see docs/deployment/scrum-134-postgres-redis-network.md):
+# Users (permissions verified with the pinned celery 5.6.3 / kombu 5.7.0 /
+# redis 6.4.0; see docs/deployment/scrum-134-postgres-redis-network.md):
 #   studyforge_ops     administration and backups only
-#   studyforge_django  Gunicorn publisher and the VM's legacy Celery consumer
+#   studyforge_django  Gunicorn publisher, the VM's legacy Celery consumer and
+#                      the password-reset cache
 #   studyforge_worker  OKE worker: document-processing queue, events, pidbox
-#
-# OPEN ISSUE (2026-11-20): one rehearsal run logged a single, not yet
-# identified ACL denial during Celery traffic. Do not load these ACLs on
-# production Redis until it is diagnosed; see "Open issue" in the doc above.
 set -euo pipefail
 
 [[ $# -eq 1 ]] || { echo "Usage: $0 OUT_DIR" >&2; exit 2; }

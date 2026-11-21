@@ -2,78 +2,64 @@
 
 Subtask of SCRUM-122 (OKE document-processing worker). Owner: Gaurav.
 
-**Status, 2026-11-21:** code and local rehearsal kit merged; **no production
-change has been made**, so the OKE worker (SCRUM-122 phase 3) is still blocked
-on this subtask. ACL fixes from source review (below) are committed but not yet
-rehearsed. Production follows the
-[run-sheet](./scrum-134-production-runsheet.md) once its gates pass.
+**Status, 2026-11-21:** code and local rehearsal complete. The open ACL
+issue is closed, and five consecutive rehearsals passed on `b6d601b` (below).
+**No production change has been made**, so the OKE worker (SCRUM-122 phase 3)
+is still blocked on this subtask. Production follows the
+[run-sheet](./scrum-134-production-runsheet.md) once its remaining gates pass.
 
-## Source review findings (2026-11-21, not yet rehearsed)
+## Findings and fixes (2026-11-21, measured)
+
+Rule: grant only what a run proves fails. Each candidate was first run with
+the new harness against the original ACL (`b54dd81`).
 
 1. **kombu was unpinned.** `celery==5.6.3` only requires `kombu>=5.6.0`, so
    the worker image resolved kombu 5.7.0 (released 2026-11-03; the published
-   image was built 2026-11-18), while the local probe venv had 5.6.2. The ACL
-   already contained 5.7.0's `_kombu.binding_deadlines` key, so measurements
-   mixed the two versions. `kombu==5.7.0` is now pinned in both requirements
-   files, and `rehearse.sh` fails if the image or probe Python differs.
-2. **Missing `RPOP`/`PEXPIRE`.** kombu 5.7.0 uses `RPOP` when it polls a
-   queue and `PEXPIRE` when it writes or reads a queue with `x-expires`.
-   Celery's pidbox reply queues have `x-expires`, so startup mingle and
-   `inspect`/control replies need both commands whenever two workers share
-   the broker. That never happened in the rehearsal (workers ran one at a
-   time), but it is the production topology: the VM's legacy worker and the
-   OKE worker. Both app users now have `+rpop +pexpire`, with key patterns
-   unchanged. The rehearsal now runs the legacy consumer while the OKE worker
-   is up and checks mingle and a control ping.
-3. **Password reset would have broken.** With `DEBUG` off, the SCRUM-135
-   `password_reset` cache is a Django `RedisCache` on the broker URL
-   (`SET NX EX`, `EXISTS`, `INCRBY`, `DEL` on `studyforge_password_reset:*`).
-   The Django user had neither the key pattern nor `INCRBY`, so every reset
-   request would have failed after the cutover. These are now granted to
-   `studyforge_django` only, and `broker_probe.py reset-cache` checks them.
+   image was built 2026-11-18), while the local probe venv had 5.6.2.
+   `kombu==5.7.0` is now pinned in both requirements files, and
+   `rehearse.sh` fails unless the image and probe Python both report
+   celery 5.6.3, kombu 5.7.0 and redis 6.4.0.
+2. **Password reset would have broken: fixed.** With `DEBUG` off, the
+   SCRUM-135 `password_reset` cache is a Django `RedisCache` on the broker URL
+   (`SET NX EX`, `EXISTS`, `INCRBY`, `DEL`). Against the original ACL,
+   `broker_probe.py reset-cache` was denied: `reason key`, user
+   `studyforge_django`, key `studyforge_password_reset:1:password-reset:…`.
+   `studyforge_django` now also has `+incrby ~studyforge_password_reset:*`.
+   This is the only ACL change.
+3. **Two workers on one broker: no change needed.** The rehearsal now runs the
+   legacy consumer while the OKE worker is up (the production topology). With
+   the original ACL, startup mingle (`sync with 1 nodes`) and a control ping
+   answered by both workers produced zero denials. A source-review guess that
+   `RPOP`/`PEXPIRE` were needed was wrong, so they were not granted.
+4. **The intermittent denial was the harness, not the ACL.** The full
+   `client-info` showed one `reason auth` (failed login) as `studyforge_django`
+   from the Docker gateway, meaning a host process. `kill "$legacy"` stopped only
+   the bash subshell, so every run left its legacy Celery worker running (twelve
+   were found). Each survivor kept logging in to the next run's Redis on the
+   same port with that earlier run's password. The very first run had no
+   survivors, which is why the denial appeared only on later runs. The worker
+   now `exec`s, so `$!` is the Python process. The cleanup trap kills it, and
+   the script refuses to start while a probe worker is still running. The
+   wrong-password check also no longer races on stdout/stderr.
 
-## Open issue: intermittent Redis ACL denial (blocks production)
+## Open issue: closed
 
-**What happened.** The full rehearsal (`rehearse.sh`) passed 46/46 with zero
-Redis ACL denials, and every manual run before it also logged zero. A later
-run, made to prove the harness catches regressions (the PostgreSQL HBA rule
-was deliberately weakened; nothing on the Redis side was changed), correctly
-reported the two expected PostgreSQL failures and one unexpected one:
+Exit criteria met: the logged denial is explained (finding 4), and five
+consecutive runs on `b6d601b` passed with zero denials and no leftover
+workers:
 
 ```
-FAIL  no Redis ACL denials during Celery traffic (got: 1)
+run 1 exit=0 50 pass, 0 fail, orphans=0, REHEARSAL PASSED
+run 2 exit=0 50 pass, 0 fail, orphans=0, REHEARSAL PASSED
+run 3 exit=0 50 pass, 0 fail, orphans=0, REHEARSAL PASSED
+run 4 exit=0 50 pass, 0 fail, orphans=0, REHEARSAL PASSED
+run 5 exit=0 50 pass, 0 fail, orphans=0, REHEARSAL PASSED
 ```
 
-So some Celery/kombu operation sometimes needs a command, key or channel that
-`redis-users.acl.template` does not grant. That run printed only the count, so
-the denied command and key are not known yet.
-
-**Likely cause (still unconfirmed).** The earlier guess was kombu's
-binding-deadline Lua cleanup. In kombu 5.7.0, though, `REFRESH_BINDING` and
-`SWEEP_BINDINGS` only touch `_kombu.binding*`, `_kombu.binding_permanent.*`
-and `_kombu.binding_deadlines` for the `celery.pidbox`, `reply.celery.pidbox`
-and `celeryev` exchanges, which the worker patterns already cover. Binding
-TTLs are at least one hour, so a three-minute run never sweeps anything. The
-missing `RPOP`/`PEXPIRE` (finding 2) is the best remaining candidate: any
-stray pidbox reply hits it. The rule below still applies: the denial counts
-as closed only when the log names it, or after five clean runs with the fixes.
-
-**How to diagnose.** `rehearse.sh` now prints the `ACL LOG` metadata
-(`reason`, `context`, `object`, `username`; never payloads) whenever a denial
-occurs. Run it until the denial recurs:
-
-```sh
-for i in 1 2 3 4 5; do infrastructure/secure-transport/rehearse.sh | grep -vE '^PASS|^== |^$'; done
-```
-
-or keep the stack with `KEEP=1` and query `ACL LOG` as `studyforge_ops`.
-
-**Fix and exit criteria.** Grant only the specific command/key/channel the log
-names, on the user that needed it, in `redis-users.acl.template`. Then require
-five consecutive clean runs. If the denial would break Celery (rather than
-being cosmetic cleanup), record which. Do not load these ACLs on production
-Redis until this is closed. After the production cutover, `ACL LOG` stays part
-of the verification checklist.
+When a denial occurs, `rehearse.sh` prints its `ACL LOG` metadata (`reason`,
+`context`, `object`, `username`, `age-seconds`, and the client's address, name,
+library and command; never credentials or payloads). After the production
+cutover, `ACL LOG` stays on the verification checklist.
 
 ## Approved decisions (Aashish, 2026-11-20)
 
@@ -132,14 +118,14 @@ of the verification checklist.
 
 Commands, keys and channels were recorded with `MONITOR` against permissive
 probe users while running the real code (celery 5.6.3, redis-py 6.4.0; kombu
-was unpinned then, see finding 1, and is now pinned to 5.7.0): Django readiness `PING`,
+was unpinned then, see finding 1, and is now pinned to 5.7.0; re-verified on 5.7.0 by the five runs above): Django readiness `PING`,
 `dispatch_document()`, a default-shape legacy Celery worker on `celery`, the
 OKE worker command line from `oke-worker.yaml` over TLS, and a hard-killed
 worker whose message is restored by a second worker (`crash_probe`). The
 kombu source added `SMEMBERS` (exchange lookup), `EXISTS` (queue check) and
 `UNSUBSCRIBE`.
 
-- Both app users: connection, queue (`LPUSH/RPUSH/BRPOP/RPOP/LLEN/EXISTS/DEL/PEXPIRE`),
+- Both app users: connection, queue (`LPUSH/RPUSH/BRPOP/LLEN/EXISTS/DEL`),
   transactions (`MULTI/EXEC/DISCARD/WATCH/UNWATCH`), unacked tracking (hash,
   sorted set, `GET/SET` mutex), bindings (sets), Lua (`EVALSHA`, `SCRIPT LOAD|EXISTS`,
   `TIME`), Pub/Sub on `/0.celery.pidbox` and `/0.celeryev/worker.*`.
@@ -216,8 +202,7 @@ and re-checks the data. All credentials live in a private temporary directory.
 
 ## Remaining work
 
-1. Re-run `rehearse.sh` five times on this branch (needs Docker). Expect zero
-   failures and zero denials. Record the summaries. This closes the open issue.
+1. ~~Re-run `rehearse.sh` five times~~: done 2026-11-21 on `b6d601b`, 5/5 passed.
 2. Send the [run-sheet](./scrum-134-production-runsheet.md) to Aashish and
    book the window. It covers backups, secret placement, the in-place upgrade,
    processing DB provisioning and migrations, the Django broker switch,

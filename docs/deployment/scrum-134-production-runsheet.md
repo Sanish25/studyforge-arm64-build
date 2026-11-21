@@ -19,7 +19,7 @@ revision. Background, design and rehearsal evidence are in
 
 | Gate | Check | Status |
 |---|---|---|
-| G1 | Five consecutive `infrastructure/secure-transport/rehearse.sh` runs on the reviewed commit: `REHEARSAL PASSED`, zero ACL denials, the pinned-version checks pass. Paste the five summaries into this doc. | open (needs Docker) |
+| G1 | Five consecutive `infrastructure/secure-transport/rehearse.sh` runs on the reviewed commit: `REHEARSAL PASSED`, zero ACL denials, the pinned-version checks pass. | **done** 2026-11-21 on `b6d601b`: 5/5 runs, 50/50 checks, zero denials (summaries in the SCRUM-134 doc) |
 | G2 | The VM checkout contains the reviewed `docker-compose.secure.yml` and `infrastructure/secure-transport/`, deployed through the normal deploy (with SCRUM-127, so Django is not deployed twice). The working tree is clean. | open |
 | G3 | The OKE source CIDR is verified (P4) and written into this doc. | open |
 | G4 | Sanish has decided what happens to the job already waiting in `document-processing` (the first OKE worker will process it). | open |
