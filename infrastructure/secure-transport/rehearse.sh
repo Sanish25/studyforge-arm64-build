@@ -6,6 +6,7 @@
 #
 # Needs Docker and a Python with celery, psycopg, redis and Django (the
 # backend virtualenv): PYTHON defaults to backend/venv/bin/python.
+# SF134_WORKER_IMAGE can select an already built local image for this run.
 #   infrastructure/secure-transport/rehearse.sh         # run, then clean up
 #   KEEP=1 infrastructure/secure-transport/rehearse.sh  # leave the stack up
 set -euo pipefail
@@ -15,7 +16,7 @@ cd "$root"
 here=infrastructure/secure-transport
 py=${PYTHON:-backend/venv/bin/python}
 py="$(cd "$(dirname "$py")" && pwd)/$(basename "$py")"
-image=studyforge-document-processing:sf134
+image=${SF134_WORKER_IMAGE:-studyforge-document-processing:sf134}
 work=$(mktemp -d "${TMPDIR:-/tmp}/sf134.XXXXXX")
 chmod 700 "$work"
 failures=0
@@ -42,15 +43,21 @@ EOF
 app_password=$(sed -n 's/^POSTGRES_PASSWORD=//p' "$work/compose.env")
 base() { docker compose --env-file "$work/compose.env" -f docker-compose.yml -f "$here/rehearsal.compose.yml" "$@"; }
 secure() { docker compose --env-file "$work/compose.env" -f docker-compose.yml -f docker-compose.secure.yml -f "$here/rehearsal.compose.yml" "$@"; }
-legacy=
+legacy_pid=
+stop_legacy_worker() {
+  if [[ -n "$legacy_pid" ]]; then
+    kill -TERM "$legacy_pid" 2>/dev/null || true
+    wait "$legacy_pid" 2>/dev/null || true
+    legacy_pid=
+  fi
+}
 # shellcheck disable=SC2329  # invoked by the EXIT trap
 cleanup() {
-  # A surviving legacy worker would keep logging in to the next run's Redis
-  # with stale credentials (seen as an `auth` ACL denial there).
-  if [[ -n "$legacy" ]]; then kill "$legacy" 2>/dev/null || true; fi
+  stop_legacy_worker
   docker ps -q --filter name=sf134r- | xargs -r docker stop >/dev/null 2>&1 || true
   if [[ "${KEEP:-0}" != 1 ]]; then
     secure down --volumes --remove-orphans >/dev/null 2>&1 || true
+    rm -rf -- "$work"
   else
     echo "Stack left running; credentials in $work"
   fi
@@ -68,7 +75,11 @@ fi
 . "$work/acl/redis-credentials.env"
 runtime_password=$(openssl rand -hex 32)
 migrator_password=$(openssl rand -hex 32)
-docker image inspect "$image" >/dev/null 2>&1 || docker build -q -t "$image" services/document-processing >/dev/null
+if [[ -n "${SF134_WORKER_IMAGE:-}" ]]; then
+  docker image inspect "$image" >/dev/null
+else
+  docker image inspect "$image" >/dev/null 2>&1 || docker build -q -t "$image" services/document-processing >/dev/null
+fi
 pass "inputs ready in a private temporary directory"
 # The ACL is measured against exact versions; a stale image or venv invalidates the run.
 versions='import celery, kombu, redis; print(celery.__version__, kombu.__version__, redis.__version__)'
@@ -76,6 +87,41 @@ expect "worker image has the pinned celery/kombu/redis" "^5\.6\.3 5\.7\.0 6\.4\.
 expect "probe Python has the pinned celery/kombu/redis" "^5\.6\.3 5\.7\.0 6\.4\.0$" "$("$py" -c "$versions")"
 
 ops() { docker exec sf134r-redis-1 redis-cli --user studyforge_ops --pass "$REDIS_OPS_PASSWORD" --no-auth-warning "$@"; }
+acl_total=0
+acl_checkpoint() {
+  local stage=$1 acl_log count
+  acl_log=$(ops --json ACL LOG 100)
+  count=$(printf '%s\n' "$acl_log" | "$py" -c '
+import json, sys
+print(sum(int(entry.get("count", 1)) for entry in json.load(sys.stdin)))
+')
+  if [[ "$count" != 0 ]]; then
+    printf 'ACL denials at checkpoint=%s count=%s\n' "$stage" "$count"
+    printf '%s\n' "$acl_log" | "$py" -c '
+import json, sys
+for entry in json.load(sys.stdin):
+    client = dict(
+        item.split("=", 1)
+        for item in entry.get("client-info", "").split()
+        if "=" in item
+    )
+    print("ACL denial reason={reason} context={context} object={object} username={username}".format(
+        reason=entry.get("reason", "unknown"),
+        context=entry.get("context", "unknown"),
+        object=entry.get("object", "unknown"),
+        username=entry.get("username", "unknown"),
+    ))
+    print("ACL client lib={lib} version={version} name={name} command={command}".format(
+        lib=client.get("lib-name", "unknown"),
+        version=client.get("lib-ver", "unknown"),
+        name=client.get("name", "unknown"),
+        command=client.get("cmd", "unknown"),
+    ))
+'
+    acl_total=$((acl_total + count))
+  fi
+  ops ACL LOG RESET >/dev/null
+}
 psql_app() { docker exec sf134r-db-1 psql -U studyforge -d "$1" -tAc "$2"; }
 on_oke() { # IP CMD... : run a client container from the simulated OKE pod range
   local ip=$1; shift
@@ -83,10 +129,15 @@ on_oke() { # IP CMD... : run a client container from the simulated OKE pod range
     -v "$root/$here/pg_probe.py:/pg_probe.py:ro" "$@" 2>&1
 }
 oke_pg() { on_oke 172.31.250.210 "$image" python /pg_probe.py "$@"; }
-oke_redis() { on_oke 172.31.250.211 redis:7-alpine redis-cli --tls --cacert /ca.pem -h 172.31.250.11 -p 6380 --no-auth-warning "$@" | head -1; }
+oke_redis() {
+  # Docker can interleave Redis's AUTH error on stderr and PING reply on stdout.
+  on_oke 172.31.250.211 redis:7-alpine redis-cli --tls --cacert /ca.pem -h 172.31.250.11 -p 6380 --no-auth-warning "$@"
+}
 host_pg() { "$py" "$here/pg_probe.py" "$@" 2>&1; }
 broker() { SF134_BROKER_URL=$1 "$py" "$here/broker_probe.py" "${@:2}" 2>&1; }
-django_url="redis://studyforge_django:$REDIS_DJANGO_PASSWORD@127.0.0.1:56379/0"
+django_broker="rediss://studyforge_django:$REDIS_DJANGO_PASSWORD@127.0.0.1:56380/0"
+tls_required="ssl_cert_reqs=required&ssl_check_hostname=true"
+django_url="$django_broker?$tls_required&ssl_ca_certs=$work/tls/ca.crt"
 worker_url="rediss://studyforge_worker:$REDIS_WORKER_PASSWORD@172.31.250.11:6380/0?ssl_cert_reqs=required&ssl_ca_certs=/etc/studyforge/trust/redis-ca.pem"
 
 section "Before: production-like plaintext services with data and a queued task"
@@ -155,9 +206,14 @@ expect "worker cannot touch the legacy celery queue" "NOPERM" "$(oke_redis --use
 expect "worker cannot FLUSHALL" "NOPERM" "$(oke_redis --user studyforge_worker --pass "$REDIS_WORKER_PASSWORD" FLUSHALL)"
 expect "worker cannot read configuration" "NOPERM" "$(oke_redis --user studyforge_worker --pass "$REDIS_WORKER_PASSWORD" CONFIG GET dir)"
 expect "Django user cannot change ACLs" "NOPERM" "$(docker exec sf134r-redis-1 redis-cli --user studyforge_django --pass "$REDIS_DJANGO_PASSWORD" --no-auth-warning ACL SETUSER x on 2>&1)"
-expect "Django readiness PING (loopback, named user)" "ping: ok" "$(broker "$django_url" ping)"
+expect "Django readiness PING (TLS, named user)" "^ping: ok$" "$(broker "$django_url" ping)"
+expect "Django rejects Redis without the private CA" "CERTIFICATE_VERIFY_FAILED.*(issuer|self.signed)" \
+  "$(broker "$django_broker?$tls_required" ping)"
+expect "Django rejects a Redis certificate hostname mismatch" "CERTIFICATE_VERIFY_FAILED.*(Hostname mismatch|not valid for)" \
+  "$(broker "${django_url/@127.0.0.1:/@localhost:}" ping)"
 ops ACL LOG RESET >/dev/null
-expect "Django user can use the password-reset cache" "^reset-cache: ok$" "$(broker "$django_url" reset-cache)"
+expect "Django password-reset throttle works over TLS" "^password-reset: ok$" "$(broker "$django_url" password-reset)"
+acl_checkpoint "django-password-reset"
 
 section "Celery: secure OKE-equivalent worker and the legacy consumer"
 dependency_check=$("$py" -c "
@@ -185,6 +241,7 @@ secure_worker() { # NAME IP DB_PASSWORD [docker-run flags]
     --include=processing_service.tests.crash_probe 2>&1
 }
 expect "readiness gate stops a worker with a bad DB password" "\"database\": \"unavailable\"" "$(secure_worker sf134r-neg 172.31.250.220 wrong || true)"
+acl_checkpoint "bad-database-readiness-gate"
 secure_worker sf134r-w1 172.31.250.221 "$runtime_password" -d >/dev/null
 sleep 12
 broker "$django_url" dispatch >/dev/null
@@ -202,32 +259,27 @@ expect "worker connected over rediss" "Connected to rediss://" "$w1_log"
 expect "task queued before the upgrade was consumed" "succeeded.*sf134-queued-before-upgrade" "$w1_log"
 expect "task published after the upgrade was consumed" "succeeded.*'sf134-marker'" "$w1_log"
 expect "real dispatch_document() publish was consumed" "process_document_task\[.*received" "$w1_log"
+acl_checkpoint "worker-consumed-dispatch-and-published-task"
 secure_worker sf134r-w2 172.31.250.222 "$runtime_password" -d >/dev/null
 sleep 20
 expect "message from a killed worker was restored and finished" "^sf134r-w1@.* sf134r-w2@" "$(ops MGET sf134r-crash:first sf134r-crash:recovered | paste -sd' ' -)"
+acl_checkpoint "worker-recovery-after-kill"
 # Production topology: the VM's legacy consumer runs while the OKE worker is
 # up, so startup mingle and control replies cross both Redis users.
 # exec, so $! is the Python worker itself and `kill` really stops it.
 (SF134_BROKER_URL=$django_url exec "$py" "$here/broker_probe.py" worker celery) >"$work/legacy.log" 2>&1 &
-legacy=$!
+legacy_pid=$!
 sleep 8
 expect "legacy consumer synced with the running OKE worker" "mingle: sync with 1 nodes" "$(cat "$work/legacy.log")"
 expect "both workers answer a control ping" "replies: .*sf134-legacy@.*sf134r-w2@" "$(broker "$django_url" inspect)"
 broker "$django_url" send celery >/dev/null
 sleep 4
 docker stop -t 10 sf134r-w2 >/dev/null
-kill "$legacy"
-wait "$legacy" 2>/dev/null || true
-legacy=
+stop_legacy_worker
+expect "legacy celery-queue consumer connects over rediss" "Connected to rediss://" "$(cat "$work/legacy.log")"
 expect "legacy celery-queue consumer works with the Django user" "celery\.accumulate\[.*succeeded" "$(cat "$work/legacy.log")"
-denials=$(ops ACL LOG 100 | grep -cx reason || true)
-expect "no Redis ACL denials during Celery traffic" "^0$" "$denials"
-if [[ "$denials" != 0 ]]; then
-  # ACL LOG metadata only (reason, context, denied command/key, user); no payloads.
-  ops ACL LOG 100 | paste - - | grep -E '^(reason|context|object|username|age-seconds)'$'\t' | cut -c1-200
-  # Which client: address, connection name, library and command only (no credentials).
-  ops ACL LOG 100 | paste - - | sed -n 's/^client-info\t//p' | grep -oE '(addr|name|lib-name|lib-ver|cmd)=[^ ]*' | paste -sd' ' -
-fi
+acl_checkpoint "legacy-celery-worker"
+expect "no unexpected Redis ACL denials during Django and Celery traffic" "^0$" "$acl_total"
 expect "document-processing queue drained" "^0$" "$(ops LLEN document-processing)"
 
 section "Rollback: base Compose file only"

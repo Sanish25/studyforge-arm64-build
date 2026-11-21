@@ -7,6 +7,7 @@ is uniquely named and dropped afterwards.
 
 import os
 import sys
+import unittest
 from pathlib import Path
 from unittest import mock
 from uuid import uuid4
@@ -42,7 +43,9 @@ class ProvisionDatabaseTests(SimpleTestCase):
         except psycopg.Error:
             superuser = False
         if not superuser:
-            raise cls.skipException("Requires a disposable PostgreSQL superuser in PROCESSING_DB_*.")
+            raise unittest.SkipTest(
+                "Requires a disposable PostgreSQL superuser in PROCESSING_DB_*."
+            )
 
     def setUp(self):
         prefix = f"sf_prov_{uuid4().hex[:10]}"
